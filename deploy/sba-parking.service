@@ -1,0 +1,20 @@
+[Unit]
+Description=SBA parking availability tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/sba-parking
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/main.ts
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=PORT=3210
+Environment=HOST=0.0.0.0
+Environment=DB_PATH=/opt/sba-parking/data/parking.db
+Environment=USER_AGENT=sba-parking-tracker/0.1 (+mailto:you@example.com)
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# Alternative to the long-running service: poll from cron, serve the page separately with POLL=0.
+*/5 * * * * cd /opt/sba-parking && /usr/bin/node --disable-warning=ExperimentalWarning src/poll-once.ts >> data/poll.log 2>&1
