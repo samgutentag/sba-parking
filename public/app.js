@@ -2,7 +2,16 @@
 
 // Color follows the lot, never its position in the current result set.
 const LOT_SLOT = { '2': 'series-1', '3': 'series-2', '4': 'series-3' }
+// Tile display order: Short-term, Long-term, Economy, matching the airport's own site.
+const TILE_ORDER = ['3', '4', '2']
 const FALLBACK_SLOTS = ['series-4', 'series-5', 'series-6']
+// Static reference info, not part of the polled feed. Source: https://flysba.santabarbaraca.gov/airport/parking
+// as of 2026-09-09. The airport can change rates without notice; this isn't fetched, so it can drift.
+const LOT_INFO = {
+  '2': { address: '140 Frederick Lopez Road', price: '$5/hr · $18/day max · cards only · 24/7, shuttle every 15 min' },
+  '3': { address: '500 Fowler Road', price: 'Free 0-10 min · $5/hr after · $32/day max · cards & cash' },
+  '4': { address: '500 Fowler Road', price: '$5/hr · $23/day max · cards & cash' },
+}
 const STATUS = {
   open: { token: '--status-good', glyph: '✓' },
   busy: { token: '--status-warning', glyph: '◐' },
@@ -10,6 +19,15 @@ const STATUS = {
   full: { token: '--status-critical', glyph: '■' },
 }
 const REFRESH_MS = 60_000
+// Trend badge: how far back to compare, how big a change has to be before it's worth showing.
+const TREND_RANGE = '6h' // finest bucket (1 min) the history API offers, comfortably covers the window below
+const TREND_WINDOW_MS = 30 * 60_000
+const TREND_THRESHOLD_PP = 5
+const TREND = {
+  tightening: { glyph: '↑', label: 'tightening' },
+  opening: { glyph: '↓', label: 'opening up' },
+  steady: { glyph: '→', label: 'steady' },
+}
 
 const state = {
   range: '24h',
@@ -25,7 +43,7 @@ const els = {
   sourceLine: $('source-line'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
   chartWrap: $('chart-wrap'), chartEmpty: $('chart-empty'), tooltip: $('tooltip'),
   chartCard: $('chart-card'), tableCard: $('table-card'), table: $('table'), tableSub: $('table-sub'),
-  historyLine: $('history-line'),
+  historyLine: $('history-line'), chartStatus: $('chart-status'),
 }
 
 function lotColorVar(lotId, index) {
@@ -43,6 +61,24 @@ function levelFor(percent) {
   if (percent >= 75) return 'limited'
   if (percent >= 50) return 'busy'
   return 'open'
+}
+
+// Compares current percent-occupied to the reading closest to `windowMs` before `nowMs`.
+// Returns null when there's no reading near enough to that target to trust the comparison
+// (for example, right after the poller starts and history is still thin).
+function trendFor(currentPercent, points, windowMs, nowMs) {
+  if (!points.length) return null
+  const targetMs = nowMs - windowMs
+  let best = null
+  for (const [ts, occ, tot] of points) {
+    const ms = ts * 1000
+    const dist = Math.abs(ms - targetMs)
+    if (!best || dist < best.dist) best = { dist, p: pct(occ, tot) }
+  }
+  if (!best || best.dist > windowMs * 0.5) return null
+  const delta = currentPercent - best.p
+  if (Math.abs(delta) < TREND_THRESHOLD_PP) return { key: 'steady', delta }
+  return { key: delta > 0 ? 'tightening' : 'opening', delta }
 }
 
 // Time formatting, always in the airport's zone.
@@ -89,7 +125,7 @@ async function getJson(url) {
 
 // ---- Tiles -------------------------------------------------------------------
 
-function renderTiles(latest) {
+function renderTiles(latest, trend) {
   els.tiles.replaceChildren()
   if (!latest.lots.length) {
     const p = document.createElement('p')
@@ -98,7 +134,8 @@ function renderTiles(latest) {
     els.tiles.append(p)
     return
   }
-  latest.lots.forEach((lot, i) => {
+  const orderedLots = [...latest.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
+  orderedLots.forEach((lot, i) => {
     const level = lot.level ?? levelFor(lot.percent)
     const status = STATUS[level]
     const tile = document.createElement('article')
@@ -119,12 +156,20 @@ function renderTiles(latest) {
     chip.append(glyph, document.createTextNode(lot.status))
     label.append(name, chip)
 
+    const trendLotHist = trend?.lots.find((l) => l.lotId === lot.lotId)
+    const t = trendLotHist
+      ? trendFor(lot.percent, trendLotHist.points, TREND_WINDOW_MS, Date.parse(lot.sourceUpdatedAt))
+      : null
+
     const value = document.createElement('div')
     value.className = 'value'
-    value.textContent = lot.free.toLocaleString()
+    const valueMain = document.createElement('span')
+    valueMain.className = 'value-main'
+    valueMain.textContent = lot.free.toLocaleString()
     const small = document.createElement('small')
     small.textContent = `free of ${lot.total.toLocaleString()}`
-    value.append(small)
+    valueMain.append(small)
+    value.append(valueMain)
 
     const meter = document.createElement('div')
     meter.className = 'meter'
@@ -145,7 +190,37 @@ function renderTiles(latest) {
     right.textContent = `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
     detail.append(left, right)
 
+    if (t) {
+      const info = TREND[t.key]
+      const badge = document.createElement('span')
+      badge.className = `trend trend-${t.key}`
+      const badgeGlyph = document.createElement('span')
+      badgeGlyph.setAttribute('aria-hidden', 'true')
+      badgeGlyph.textContent = info.glyph
+      badge.append(badgeGlyph, document.createTextNode(info.label))
+      badge.setAttribute(
+        'aria-label',
+        t.key === 'steady'
+          ? 'Occupancy steady over the last 30 minutes'
+          : `Occupancy ${info.label}, ${Math.abs(Math.round(t.delta))} percentage points over the last 30 minutes`,
+      )
+      value.append(badge)
+    }
+
     tile.append(label, value, meter, detail)
+
+    const info = LOT_INFO[lot.lotId]
+    if (info) {
+      const infoEl = document.createElement('p')
+      infoEl.className = 'info'
+      const address = document.createElement('span')
+      address.textContent = info.address
+      const price = document.createElement('span')
+      price.textContent = info.price
+      infoEl.append(address, price)
+      tile.append(infoEl)
+    }
+
     els.tiles.append(tile)
   })
 }
@@ -184,6 +259,26 @@ function svgEl(tag, attrs = {}) {
   const el = document.createElementNS(SVG_NS, tag)
   for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v))
   return el
+}
+
+// Catmull-Rom through the real points, converted to cubic Bezier segments. No interpolated
+// values, just a smoother line through the same readings a straight-segment path would use.
+function smoothPath(pts) {
+  if (pts.length === 0) return ''
+  if (pts.length === 1) return `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`
+  let d = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] ?? pts[i]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2] ?? p2
+    const c1x = p1.x + (p2.x - p0.x) / 6
+    const c1y = p1.y + (p2.y - p0.y) / 6
+    const c2x = p2.x - (p3.x - p1.x) / 6
+    const c2y = p2.y - (p3.y - p1.y) / 6
+    d += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`
+  }
+  return d
 }
 
 function chooseTicks(sinceMs, untilMs, width) {
@@ -278,13 +373,16 @@ function renderChart(history) {
   const series = lots.map((lot, i) => {
     const color = lotColorVar(lot.lotId, i)
     const pts = lot.points.map(([ts, occ, tot]) => ({ ms: ts * 1000, p: pct(occ, tot), occ, tot }))
-    let d = ''
-    let prev = null
+    const runs = []
+    let current = []
+    let prevMs = null
     for (const pt of pts) {
-      const cmd = !prev || pt.ms - prev.ms > gapMs ? 'M' : 'L'
-      d += `${cmd}${x(pt.ms).toFixed(1)},${y(pt.p).toFixed(1)}`
-      prev = pt
+      if (prevMs !== null && pt.ms - prevMs > gapMs) { runs.push(current); current = [] }
+      current.push(pt)
+      prevMs = pt.ms
     }
+    if (current.length) runs.push(current)
+    const d = runs.map((run) => smoothPath(run.map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))).join(' ')
     const path = svgEl('path', { d, class: 'series', stroke: color })
     svg.append(path)
     return { lot, color, pts, endY: pts.length ? y(pts[pts.length - 1].p) : null }
@@ -358,6 +456,7 @@ function showHover(index) {
     g.crosshair.setAttribute('visibility', 'hidden')
     g.dots.forEach((d) => d.setAttribute('visibility', 'hidden'))
     hideTooltip()
+    els.chartStatus.textContent = ''
     return
   }
   const ms = g.xs[index]
@@ -399,6 +498,14 @@ function showHover(index) {
     tip.append(row)
   }
   tip.hidden = false
+
+  // The SVG is exposed to assistive tech as a single opaque image (role="img"), so arrow-key
+  // scrubbing needs this text equivalent. aria-live announces it; screen readers skip re-announcing
+  // when the text is unchanged, so rapid pointermove over the same bucket doesn't spam it.
+  els.chartStatus.textContent = rows.length
+    ? `${fmt.dateTime.format(new Date(ms))}: ${rows.map((r) => `${r.name} ${Math.round(r.p)}% (${r.free.toLocaleString()} free)`).join(', ')}`
+    : `${fmt.dateTime.format(new Date(ms))}: no reading`
+
   const wrapW = els.chartWrap.clientWidth
   const pxX = (cx / g.width) * wrapW
   const tipW = tip.offsetWidth
@@ -432,14 +539,18 @@ function renderTable(history) {
   const hr = document.createElement('tr')
   const th0 = document.createElement('th')
   th0.textContent = 'Time (PT)'
+  th0.setAttribute('scope', 'col')
   hr.append(th0)
   lots.forEach((lot, i) => {
     const th = document.createElement('th')
+    th.setAttribute('scope', 'col')
     th.style.setProperty('--c', lotColorVar(lot.lotId, i))
     const key = document.createElement('span'); key.className = 'key'
     th.append(key, document.createTextNode(`${shortName(lot.lotName)} free`))
     hr.append(th)
     const th2 = document.createElement('th')
+    th2.setAttribute('scope', 'col')
+    th2.setAttribute('aria-label', `${shortName(lot.lotName)} percent full`)
     th2.textContent = '%'
     hr.append(th2)
   })
@@ -471,9 +582,15 @@ function renderTable(history) {
 
 async function loadLatest() {
   try {
-    state.latest = await getJson('/api/latest')
-    renderTiles(state.latest)
-    renderSourceLine(state.latest)
+    // Trend history is a fixed short window, independent of the chart's range selector,
+    // so the tile trend badges don't shift when you switch the chart to 7d/30d/all.
+    const [latest, trend] = await Promise.all([
+      getJson('/api/latest'),
+      getJson(`/api/history?range=${TREND_RANGE}`),
+    ])
+    state.latest = latest
+    renderTiles(latest, trend)
+    renderSourceLine(latest)
   } catch (err) {
     els.sourceLine.textContent = `Could not reach the service (${err.message})`
   }

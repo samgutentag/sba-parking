@@ -40,11 +40,12 @@
           <h2>Occupancy</h2>
           <p class="sub">Percent of spaces occupied. Three lots, one axis.</p>
         </div>
-        <ul class="legend" id="legend" aria-label="Lots"></ul>
+        <ul class="legend" id="legend" role="list" aria-label="Lots"></ul>
       </div>
       <div class="chart-wrap" id="chart-wrap">
         <svg id="chart" role="img" aria-label="Occupancy over time" tabindex="0"></svg>
         <div class="tooltip" id="tooltip" hidden></div>
+        <div class="visually-hidden" id="chart-status" aria-live="polite" aria-atomic="true"></div>
       </div>
       <p class="empty" id="chart-empty" hidden>No readings in this range yet. The poller stores a new row each time the airport feed changes.</p>
     </section>
@@ -52,22 +53,25 @@
     <section class="card" id="table-card" hidden>
       <div class="card-head">
         <div>
-          <h2>Readings</h2>
+          <h2 id="table-heading">Readings</h2>
           <p class="sub" id="table-sub"></p>
         </div>
       </div>
       <div class="table-wrap">
-        <table id="table"></table>
+        <table id="table" aria-labelledby="table-heading"></table>
       </div>
     </section>
-  </main>
 
-  <footer class="page-foot">
-    <p id="history-line"></p>
-    <p>Counts exclude ADA spaces. Data comes from the airport's own feed at
-      <a href="https://flysba.santabarbaraca.gov/airport/parking">flysba.santabarbaraca.gov</a>,
-      which refreshes about every three minutes. Times are Pacific.</p>
-  </footer>
+    <div class="callout" role="note">
+      <p><strong>ADA parking</strong> is held in the short-term and long-term lots, even when a lot shows full,
+        and isn't included in the counts above. Cell-phone lots for pickups, bike racks near the terminal
+        entrances. No RVs on airport property.</p>
+      <p id="history-line"></p>
+      <p>Data comes from the airport's own feed at
+        <a href="https://flysba.santabarbaraca.gov/airport/parking">flysba.santabarbaraca.gov</a>,
+        which refreshes about every three minutes. Times are Pacific.</p>
+    </div>
+  </main>
 
   <script src="/app.js"></script>
 </body>
