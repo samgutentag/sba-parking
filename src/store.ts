@@ -2,6 +2,7 @@
 // Worker will use D1. Both speak SQLite, so the schema and statements live here once.
 
 import type { LotReading } from './source.ts'
+import type { FlightRecord } from './flights-source.ts'
 
 export interface LatestRow {
   lot_id: string
@@ -21,6 +22,14 @@ export interface HistoryRow {
   occupied: number
   total: number
   samples: number
+}
+
+export interface TypicalRawRow {
+  lot_id: string
+  lot_name: string
+  total: number
+  occupied: number
+  source_updated_ts: number
 }
 
 export interface PollRow {
@@ -46,14 +55,52 @@ export interface PollRecord {
   error?: string
 }
 
+export interface FlightRow {
+  type: string
+  rec: string
+  flight_date: string
+  scheduled_local: string
+  scheduled_ts: number
+  airline: string
+  airline_code: string
+  flight_number: string
+  city: string
+  city_code: string
+  gate: string
+  remark: string
+  first_seen_utc: string
+  last_seen_utc: string
+}
+
+export interface FlightStoreStats {
+  flights: number
+  earliest_ts: number | null
+  latest_ts: number | null
+  polls: number
+  failed_polls_24h: number
+}
+
+// One store, two feeds: the flights methods below share the same SQLite file and connection
+// as the parking ones (see sqlite-store.ts), just against separate tables, so there's no
+// separate store class or wiring to stand up for the second poller.
 export interface ParkingStore {
   /** Upsert one poll's readings. Identical readings only bump last_seen_utc. */
   recordReadings(readings: LotReading[], nowIso: string): Promise<{ inserted: number; seen: number }>
   recordPoll(poll: PollRecord, nowIso: string): Promise<void>
   latest(): Promise<LatestRow[]>
   history(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]>
+  /** Raw readings since `sinceTs`, for bucketing into typical-day / typical-day-of-week baselines. */
+  typicalRaw(sinceTs: number): Promise<TypicalRawRow[]>
   lastPoll(): Promise<PollRow | undefined>
   stats(): Promise<StoreStats>
+
+  /** Upsert one poll's flight board. An unchanged flight only bumps last_seen_utc. */
+  recordFlights(flights: FlightRecord[], nowIso: string): Promise<{ inserted: number; seen: number }>
+  recordFlightPoll(poll: PollRecord, nowIso: string): Promise<void>
+  flightsInRange(sinceTs: number, untilTs: number): Promise<FlightRow[]>
+  lastFlightPoll(): Promise<PollRow | undefined>
+  flightStats(): Promise<FlightStoreStats>
+
   close(): Promise<void>
 }
 
@@ -82,6 +129,40 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     error TEXT
   )`,
   'CREATE INDEX IF NOT EXISTS polls_ts ON polls (ts_utc)',
+  // One row per distinct scheduled flight leg. Identity is (type, rec, flight_date): `rec` is
+  // the vendor's own record id, and flight_date guards against it ever being reused across
+  // days. Gate/remark/time update in place as the live board changes; first_seen_utc doesn't.
+  `CREATE TABLE IF NOT EXISTS flights (
+    id INTEGER PRIMARY KEY,
+    type TEXT NOT NULL,
+    rec TEXT NOT NULL,
+    flight_date TEXT NOT NULL,
+    scheduled_local TEXT NOT NULL,
+    scheduled_ts INTEGER NOT NULL,
+    airline TEXT NOT NULL,
+    airline_code TEXT NOT NULL,
+    flight_number TEXT NOT NULL,
+    city TEXT NOT NULL,
+    city_code TEXT NOT NULL,
+    gate TEXT NOT NULL,
+    remark TEXT NOT NULL,
+    first_seen_utc TEXT NOT NULL,
+    last_seen_utc TEXT NOT NULL,
+    UNIQUE (type, rec, flight_date)
+  )`,
+  'CREATE INDEX IF NOT EXISTS flights_scheduled_ts ON flights (scheduled_ts)',
+  'CREATE INDEX IF NOT EXISTS flights_type_ts ON flights (type, scheduled_ts)',
+  // Separate from `polls` on purpose: mixing the two feeds' poll history into one table would
+  // make /api/health's staleness check reflect whichever poller happened to run last.
+  `CREATE TABLE IF NOT EXISTS flight_polls (
+    id INTEGER PRIMARY KEY,
+    ts_utc TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    http_status INTEGER,
+    new_rows INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS flight_polls_ts ON flight_polls (ts_utc)',
 ]
 
 /** Statements use positional `?N` parameters, which node:sqlite and D1 both accept. */
@@ -117,6 +198,15 @@ export const SQL = {
     GROUP BY lot_id, bucket_ts
     ORDER BY bucket_ts, lot_id`,
 
+  // ?1 since epoch seconds. Raw rows, not aggregated: hour-of-day and weekday depend on the
+  // airport's local timezone, which SQLite can't resolve portably (no tz data, and D1 would
+  // differ from node:sqlite's 'localtime' anyway), so that bucketing happens in JS instead.
+  typicalRaw: `
+    SELECT lot_id, lot_name, total, occupied, source_updated_ts
+    FROM readings
+    WHERE source_updated_ts >= ?1
+    ORDER BY source_updated_ts`,
+
   lastPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT 1',
 
   // ?1 ISO timestamp 24 hours ago.
@@ -126,4 +216,38 @@ export const SQL = {
            (SELECT MAX(source_updated_ts) FROM readings) AS latest_ts,
            (SELECT COUNT(*) FROM polls) AS polls,
            (SELECT COUNT(*) FROM polls WHERE ok = 0 AND ts_utc >= ?1) AS failed_polls_24h`,
+
+  // Dedupe on (type, rec, flight_date): an unchanged flight only bumps last_seen_utc, same
+  // idea as upsertReading. Gate/remark/time DO get overwritten on conflict, unlike the parking
+  // upsert, since those are exactly the fields a live board updates (delays, gate changes).
+  upsertFlight: `
+    INSERT INTO flights (type, rec, flight_date, scheduled_local, scheduled_ts, airline, airline_code, flight_number, city, city_code, gate, remark, first_seen_utc, last_seen_utc)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+    ON CONFLICT (type, rec, flight_date) DO UPDATE SET
+      scheduled_local = excluded.scheduled_local,
+      scheduled_ts = excluded.scheduled_ts,
+      gate = excluded.gate,
+      remark = excluded.remark,
+      last_seen_utc = excluded.last_seen_utc
+    RETURNING first_seen_utc = last_seen_utc AS inserted`,
+
+  insertFlightPoll: 'INSERT INTO flight_polls (ts_utc, ok, http_status, new_rows, error) VALUES (?1, ?2, ?3, ?4, ?5)',
+
+  // ?1 since, ?2 until (epoch seconds), ordered so a caller can walk the window chronologically.
+  flightsInRange: `
+    SELECT type, rec, flight_date, scheduled_local, scheduled_ts, airline, airline_code,
+           flight_number, city, city_code, gate, remark, first_seen_utc, last_seen_utc
+    FROM flights
+    WHERE scheduled_ts >= ?1 AND scheduled_ts <= ?2
+    ORDER BY scheduled_ts`,
+
+  lastFlightPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM flight_polls ORDER BY id DESC LIMIT 1',
+
+  // ?1 ISO timestamp 24 hours ago.
+  flightStats: `
+    SELECT (SELECT COUNT(*) FROM flights) AS flights,
+           (SELECT MIN(scheduled_ts) FROM flights) AS earliest_ts,
+           (SELECT MAX(scheduled_ts) FROM flights) AS latest_ts,
+           (SELECT COUNT(*) FROM flight_polls) AS polls,
+           (SELECT COUNT(*) FROM flight_polls WHERE ok = 0 AND ts_utc >= ?1) AS failed_polls_24h`,
 } as const

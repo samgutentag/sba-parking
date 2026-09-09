@@ -11,6 +11,7 @@
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/main.ts",
     "poll": "node --disable-warning=ExperimentalWarning src/poll-once.ts",
+    "poll:flights": "node --disable-warning=ExperimentalWarning src/flights-poll-once.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

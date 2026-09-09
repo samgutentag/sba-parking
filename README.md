@@ -8,9 +8,10 @@ Zero runtime dependencies. Node 24 covers everything: `fetch`, `node:sqlite`, `n
 
 ```sh
 pnpm install          # dev deps only
-pnpm start            # poller + web page on http://127.0.0.1:3210
+pnpm start            # both pollers + web page on http://127.0.0.1:3210
 pnpm dev              # same, restarts on file change
-pnpm poll             # one poll, then exit (for cron)
+pnpm poll             # one parking poll, then exit (for cron)
+pnpm poll:flights     # one flights poll, then exit (for cron)
 pnpm typecheck
 ```
 
@@ -36,6 +37,20 @@ Things the code assumes, all lifted from the original research:
 
 The endpoint was found in `window.drupalSettings.citizenParkingData` on the parking page. The page is server-rendered, so there was no XHR to sniff.
 
+## Flight schedule feed (experimental)
+
+`GET https://infax.com/webfids/sba/fids-sba.json`
+
+Also no auth, no key. The airport's own arrivals-departures page embeds a "Real-Time Arrivals/Departures" widget from FIDS vendor Infax; that widget's own JS makes this same AJAX call, found by reading `js/main.js` inside the embedded iframe. It's the airport's chosen public flight board, just hosted on the vendor's domain rather than the airport's own.
+
+```json
+{"type":"D","rec":"118685","an":"United","ac":"UA","flt":"2865","city":"Denver","cc":"DEN","date":"09/10/26","sked":"0500","gate":"4","rem":"ON TIME","bag":" "}
+```
+
+This is a **live board, not a schedule archive**: it only ever returns today's (and sometimes tonight's overnight) flights, arrivals and departures mixed (`type` is `A` or `D`). There's no seat count or aircraft type, so a flight count is a proxy for passenger volume, not the real number. The point of tracking this at all is to eventually check whether departure volume in a given window correlates with the parking lots filling up faster, e.g. "5 departures around 9am" — but that's a hypothesis, not a claim this repo makes yet, and won't be worth testing until weeks of paired flight and occupancy data exist. `src/flights-source.ts` parses leniently (skips a malformed row rather than failing the whole poll), unlike the stricter parking parser, since this is a status board that can plausibly emit odd rows.
+
+Polled every 15 minutes by default (`FLIGHTS_POLL_INTERVAL_MS`), independently of the parking poller, with the same exponential backoff on failure. Disable with `POLL_FLIGHTS=0`.
+
 ## How it stores data
 
 Storage sits behind the `ParkingStore` interface in `src/store.ts`, which also owns the schema and every SQL statement. The Node backend is `src/sqlite-store.ts` (node:sqlite, a single file at `data/parking.db`, WAL mode). The planned Cloudflare Workers port adds a D1 backend behind the same interface and reuses the statements as written: the SQL is plain SQLite with positional `?N` parameters, and the schema has no pragmas.
@@ -53,12 +68,16 @@ The poller runs every 5 minutes. When the feed has not changed since the last po
 
 On failure the poller backs off exponentially, from 5 minutes up to 1 hour, and never retries faster than the base interval.
 
+Flights are stored the same way, one row per distinct scheduled leg in a separate `flights` table, keyed on `(type, rec, flight_date)` — `rec` is the vendor's own record id. Unlike the parking upsert, `gate`/`remark`/`scheduled_local` are overwritten on conflict rather than left alone, since those are exactly the fields a live board updates (delays, gate changes) as the day goes on. Flight polls log to their own `flight_polls` table rather than `polls`, so the two pollers' health never gets mixed together.
+
 ## API
 
 | route | returns |
 |---|---|
 | `GET /api/latest` | newest reading per lot with free count, percent, status label, plus poller health and history stats |
 | `GET /api/history?range=6h\|24h\|7d\|30d\|all` | per-lot points `[epochSeconds, occupied, total]`, bucketed by average (1 min, 1 min, 15 min, 1 h, adaptive) |
+| `GET /api/typical` | per-lot hour-of-day and hour-of-day-by-weekday baseline curves, for the chart's dashed reference lines |
+| `GET /api/flights` | flights poller health, storage stats, and the last day's flight board — diagnostic only, no correlation with parking yet |
 | `GET /api/health` | 200 when the last poll is recent, 503 when polling is enabled but stale |
 
 ## Web page
@@ -87,13 +106,14 @@ The module boundaries map directly:
 | `sqlite-store.ts` | D1 backend implementing `ParkingStore` |
 | `server.ts` (node:http) | `fetch` handler; `public/` served by Static Assets |
 | `poller.ts` + `main.ts` (timer loop) | Cron Trigger `*/5 * * * *` calling `pollOnce` |
-| `source.ts`, `time.ts`, `status.ts`, `public/` | unchanged |
+| `flights-poller.ts` | second Cron Trigger `*/15 * * * *` calling `pollFlightsOnce` |
+| `source.ts`, `flights-source.ts`, `time.ts`, `status.ts`, `public/` | unchanged |
 
 Check first that Cloudflare egress can reach the `.gov` endpoint. If a WAF blocks it, the Pi keeps polling and posts readings to the Worker instead.
 
 ## Upstream etiquette
 
-- One poll every 5 minutes, one process. Never poll per page view; the page reads the local database.
-- Descriptive `User-Agent` with a contact address.
+- One poll every 5 minutes for parking, every 15 for flights, one process each. Never poll per page view; the page reads the local database.
+- Descriptive `User-Agent` with a contact address, sent to both upstreams.
 - Serve stale data on error rather than retrying hard.
 - Airport parking office, if a heads-up ever seems warranted: (805) 967-2745, Reimagined Parking.

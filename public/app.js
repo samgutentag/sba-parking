@@ -20,7 +20,9 @@ const STATUS = {
 }
 const REFRESH_MS = 60_000
 // Trend badge: how far back to compare, how big a change has to be before it's worth showing.
-const TREND_RANGE = '6h' // finest bucket (1 min) the history API offers, comfortably covers the window below
+// Shared 1-min-bucket fetch for two things: the trend badge (needs the last ~30 min) and the
+// v2 tile's 24h free-spaces bar chart (needs the full day). One fetch covers both.
+const MINI_HISTORY_RANGE = '24h'
 const TREND_WINDOW_MS = 30 * 60_000
 const TREND_THRESHOLD_PP = 5
 const TREND = {
@@ -30,20 +32,43 @@ const TREND = {
 }
 
 const state = {
-  range: '24h',
+  range: 'today',
   view: 'chart',
   timeZone: 'America/Los_Angeles',
   latest: null,
   history: null,
+  typical: null,
+  showTypicalDay: false,
+  showTypicalDow: false,
+  flights: null,
+  showArrivals: false,
+  showDepartures: false,
   hoverIndex: null,
 }
 
+// Baseline overlays repeat a 24h curve across the visible window, which only reads as a
+// reference line on short ranges; over 30d/all it would just be a weekly sawtooth under
+// months of real data, so the toggle hides itself there instead of rendering noise.
+const TYPICAL_SUPPORTED_RANGES = new Set(['6h', 'today', '7d'])
+const TYPICAL_REFRESH_MS = 30 * 60_000 // baselines drift slowly; no need for the 60s cadence
+// Flight markers are one vertical line per scheduled flight. Even a single day is ~20 flights,
+// so anything wider than a day (7d and up) would just be a wall of lines — restrict to the
+// two short, single-day-ish ranges where the lines stay legible.
+const FLIGHTS_SUPPORTED_RANGES = new Set(['6h', 'today'])
+// Turned off for now: even scoped to short ranges, the vertical lines read as cluttered.
+// Flip this back on to re-enable the toggle and overlay — the rest of the code is untouched.
+const FLIGHTS_CHART_MARKERS_ENABLED = false
+
 const $ = (id) => document.getElementById(id)
 const els = {
-  sourceLine: $('source-line'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
+  sourceLine: $('source-line'), tiles: $('tiles'), tilesV2: $('tiles-v2'), legend: $('legend'), chart: $('chart'),
   chartWrap: $('chart-wrap'), chartEmpty: $('chart-empty'), tooltip: $('tooltip'),
-  chartCard: $('chart-card'), tableCard: $('table-card'), table: $('table'), tableSub: $('table-sub'),
-  historyLine: $('history-line'), chartStatus: $('chart-status'),
+  tableWrap: $('table-wrap'), table: $('table'), tableSub: $('table-sub'),
+  historyLine: $('history-line'), chartStatus: $('chart-status'), typicalGroup: $('typical-group'),
+  flightsGroup: $('flights-group'),
+  flightsBoardSub: $('flights-board-sub'),
+  arrivalsTable: $('arrivals-table'), arrivalsEmpty: $('arrivals-empty'), arrivalsHeading: $('arrivals-heading'),
+  departuresTable: $('departures-table'), departuresEmpty: $('departures-empty'), departuresHeading: $('departures-heading'),
 }
 
 function lotColorVar(lotId, index) {
@@ -84,6 +109,7 @@ function trendFor(currentPercent, points, windowMs, nowMs) {
 // Time formatting, always in the airport's zone.
 const fmt = {
   time: new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, hour: 'numeric', minute: '2-digit' }),
+  hourOnly: new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, hour: 'numeric' }),
   dayTime: new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short', hour: 'numeric', minute: '2-digit' }),
   date: new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, month: 'short', day: 'numeric' }),
   dateTime: new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
@@ -106,6 +132,12 @@ function nextLocalMidnight(utcMs) {
   }
   return guess
 }
+const weekdayFmt = new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short' })
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+function localWeekday(utcMs) {
+  return WEEKDAY_INDEX[weekdayFmt.format(new Date(utcMs))] ?? 0
+}
+
 function relative(iso) {
   if (!iso) return 'never'
   const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000))
@@ -140,8 +172,11 @@ function renderTiles(latest, trend) {
     const status = STATUS[level]
     const tile = document.createElement('article')
     tile.className = 'tile'
+    tile.dataset.lotId = lot.lotId
     tile.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
     tile.style.setProperty('--chip-color', `var(${status.token})`)
+    tile.addEventListener('pointerenter', () => setLotHover(lot.lotId))
+    tile.addEventListener('pointerleave', () => setLotHover(null))
 
     const label = document.createElement('div')
     label.className = 'label'
@@ -225,6 +260,145 @@ function renderTiles(latest, trend) {
   })
 }
 
+// ---- Tiles v2 (comparison layout) ----------------------------------------------
+
+// Small donut: background track + one colored arc for percent occupied, percent centered.
+function ringChart(percent, colorVar) {
+  const size = 64
+  const stroke = 8
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const pctVal = Math.max(0, Math.min(100, percent))
+  const dash = (pctVal / 100) * c
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${size} ${size}`, width: size, height: size, class: 'ring',
+    role: 'img', 'aria-label': `${Math.round(pctVal)}% occupied`,
+  })
+  svg.append(svgEl('circle', { cx: size / 2, cy: size / 2, r, class: 'ring-track' }))
+  svg.append(svgEl('circle', {
+    cx: size / 2, cy: size / 2, r, class: 'ring-value', stroke: colorVar,
+    'stroke-dasharray': `${dash.toFixed(1)} ${(c - dash).toFixed(1)}`,
+    transform: `rotate(-90 ${size / 2} ${size / 2})`,
+  }))
+  const label = svgEl('text', { x: size / 2, y: size / 2 + 5, 'text-anchor': 'middle', class: 'ring-label' })
+  label.textContent = `${Math.round(pctVal)}%`
+  svg.append(label)
+  return svg
+}
+
+// 24 hourly buckets of average free spaces over the trailing 24h, oldest first (left),
+// most recent hour last (right). A bucket with no readings yet renders as a near-empty bar
+// rather than being skipped, so the chart always shows 24 slots even while data is thin.
+// `ms` is that bucket's approximate clock hour, kept for the hover tooltip's hour label.
+function hourlyFreeAverages(historyLot, nowMs) {
+  const buckets = Array.from({ length: 24 }, () => ({ sum: 0, count: 0 }))
+  for (const [ts, occ, tot] of historyLot?.points ?? []) {
+    const ageMs = nowMs - ts * 1000
+    if (ageMs < 0 || ageMs >= 24 * 3600_000) continue
+    const idx = 23 - Math.floor(ageMs / 3600_000)
+    buckets[idx].sum += Math.max(0, tot - occ)
+    buckets[idx].count += 1
+  }
+  return buckets.map((b, idx) => ({
+    ms: nowMs - (23 - idx) * 3600_000,
+    value: b.count ? b.sum / b.count : null,
+  }))
+}
+
+function hourBarsEl(buckets) {
+  const wrap = document.createElement('div')
+  wrap.className = 'hour-bars'
+  wrap.setAttribute('role', 'img')
+  wrap.setAttribute('aria-label', 'Average free spaces by hour, last 24 hours, oldest to most recent')
+  const known = buckets.map((b) => b.value).filter((v) => v !== null)
+  const max = Math.max(1, ...known)
+  buckets.forEach(({ ms, value }) => {
+    const bar = document.createElement('span')
+    bar.className = value === null ? 'bar bar-empty' : 'bar'
+    bar.style.height = value === null ? '4%' : `${Math.max(6, (value / max) * 100)}%`
+    // Native title tooltip, three stacked lines: hour of day, the count, then "available".
+    if (value !== null) bar.title = `${fmt.hourOnly.format(new Date(ms))}\n${Math.round(value)}\navailable`
+    wrap.append(bar)
+  })
+  return wrap
+}
+
+function renderTilesV2(latest, trend) {
+  els.tilesV2.replaceChildren()
+  if (!latest.lots.length) return
+  const nowMs = Date.now()
+  const orderedLots = [...latest.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
+  orderedLots.forEach((lot, i) => {
+    const level = lot.level ?? levelFor(lot.percent)
+    const status = STATUS[level]
+    const tile = document.createElement('article')
+    tile.className = 'tile-v2'
+    tile.dataset.lotId = lot.lotId
+    tile.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
+    tile.style.setProperty('--chip-color', `var(${status.token})`)
+    tile.addEventListener('pointerenter', () => setLotHover(lot.lotId))
+    tile.addEventListener('pointerleave', () => setLotHover(null))
+
+    const label = document.createElement('div')
+    label.className = 'label'
+    const name = document.createElement('span')
+    name.textContent = lot.lotName
+    const chip = document.createElement('span')
+    chip.className = 'chip'
+    const glyph = document.createElement('span')
+    glyph.className = 'glyph'
+    glyph.setAttribute('aria-hidden', 'true')
+    glyph.textContent = status.glyph
+    chip.append(glyph, document.createTextNode(lot.status))
+    label.append(name, chip)
+
+    const trendLotHist = trend?.lots.find((l) => l.lotId === lot.lotId)
+    const t = trendLotHist
+      ? trendFor(lot.percent, trendLotHist.points, TREND_WINDOW_MS, Date.parse(lot.sourceUpdatedAt))
+      : null
+
+    // Left column: ring, trend underneath.
+    const leftCol = document.createElement('div')
+    leftCol.className = 'v2-col v2-col-ring'
+    leftCol.append(ringChart(lot.percent, 'var(--chip-color)'))
+    if (t) {
+      const info = TREND[t.key]
+      const badge = document.createElement('span')
+      badge.className = `trend trend-${t.key}`
+      const badgeGlyph = document.createElement('span')
+      badgeGlyph.setAttribute('aria-hidden', 'true')
+      badgeGlyph.textContent = info.glyph
+      badge.append(badgeGlyph, document.createTextNode(info.label))
+      badge.setAttribute(
+        'aria-label',
+        t.key === 'steady'
+          ? 'Occupancy steady over the last 30 minutes'
+          : `Occupancy ${info.label}, ${Math.abs(Math.round(t.delta))} percentage points over the last 30 minutes`,
+      )
+      leftCol.append(badge)
+    }
+
+    // Right column: free-of-total count, 24h free-spaces bars underneath.
+    const rightCol = document.createElement('div')
+    rightCol.className = 'v2-col v2-col-detail'
+    const valueMain = document.createElement('span')
+    valueMain.className = 'value-main'
+    valueMain.textContent = lot.free.toLocaleString()
+    const small = document.createElement('small')
+    small.textContent = `free of ${lot.total.toLocaleString()}`
+    valueMain.append(small)
+    rightCol.append(valueMain)
+    rightCol.append(hourBarsEl(hourlyFreeAverages(trendLotHist, nowMs)))
+
+    const grid = document.createElement('div')
+    grid.className = 'v2-grid'
+    grid.append(leftCol, rightCol)
+
+    tile.append(label, grid)
+    els.tilesV2.append(tile)
+  })
+}
+
 function renderSourceLine(latest) {
   const p = latest.poller
   const dot = document.createElement('span')
@@ -281,6 +455,39 @@ function smoothPath(pts) {
   return d
 }
 
+// Repeats a 24h typical curve across every local calendar day the visible window touches.
+// `kind` picks which curve backs each day: 'day' uses the one blended-across-all-days curve,
+// 'dow' looks up that day's own weekday so a Tuesday shows Tuesday's average, a Saturday
+// shows Saturday's. Hours with no historical reading (null) are skipped rather than
+// interpolated, so the dashed line breaks exactly where the source data doesn't cover it.
+// Days are walked as if every local day were 24 UTC hours; on the two DST-change days a year
+// that's off by an hour, which is fine for a faint reference line. For 'dow', a weekday with
+// fewer than `minDowDays` distinct historical days is treated as having no curve yet, so the
+// line has a visible gap over that day instead of an average of one, which isn't "typical."
+function typicalOverlayPoints(typicalLot, sinceMs, untilMs, kind, minDowDays = 0) {
+  if (!typicalLot) return []
+  const pts = []
+  let dayStart = nextLocalMidnight(sinceMs - 25 * 3600_000)
+  let guard = 0
+  while (dayStart <= untilMs && guard++ < 400) {
+    let curve = kind === 'dow'
+      ? typicalLot.dayOfWeek.find((d) => d.weekday === localWeekday(dayStart + 3600_000))
+      : typicalLot.day
+    if (kind === 'dow' && curve && curve.days < minDowDays) curve = null
+    if (curve) {
+      for (let h = 0; h < 24; h++) {
+        const v = curve.hours[h]
+        if (v === null || v === undefined) continue
+        const ms = dayStart + h * 3600_000
+        if (ms < sinceMs || ms > untilMs) continue
+        pts.push({ ms, p: v })
+      }
+    }
+    dayStart = nextLocalMidnight(dayStart + 1000)
+  }
+  return pts
+}
+
 function chooseTicks(sinceMs, untilMs, width) {
   const span = untilMs - sinceMs
   const target = Math.max(3, Math.min(8, Math.floor(width / 110)))
@@ -306,20 +513,33 @@ function chooseTicks(sinceMs, untilMs, width) {
   return ticks
 }
 
+function legendEntry(label, colorVar, dashed = false) {
+  const li = document.createElement('li')
+  li.style.setProperty('--c', colorVar)
+  const key = document.createElement('span')
+  key.className = dashed ? 'key key-dashed' : 'key'
+  key.setAttribute('aria-hidden', 'true')
+  li.append(key, document.createTextNode(label))
+  els.legend.append(li)
+}
+
 function renderLegend(lots) {
   els.legend.replaceChildren()
-  lots.forEach((lot, i) => {
-    const li = document.createElement('li')
-    li.style.setProperty('--c', lotColorVar(lot.lotId, i))
-    const key = document.createElement('span')
-    key.className = 'key'
-    key.setAttribute('aria-hidden', 'true')
-    li.append(key, document.createTextNode(shortName(lot.lotName)))
-    els.legend.append(li)
-  })
+  lots.forEach((lot, i) => legendEntry(shortName(lot.lotName), lotColorVar(lot.lotId, i)))
 }
 
 let chartGeom = null
+
+// Hovering a stat tile dims every other lot's lines (main + typical baselines) to 30%
+// opacity so the hovered lot's line stands out. No-ops when the chart isn't rendered
+// (table view, or before the first load).
+function setLotHover(lotId) {
+  if (!chartGeom) return
+  for (const s of chartGeom.series) {
+    const dim = lotId != null && s.lot.lotId !== lotId
+    for (const el of s.dimEls) el.classList.toggle('dimmed', dim)
+  }
+}
 
 function renderChart(history) {
   const svg = els.chart
@@ -368,8 +588,41 @@ function renderChart(history) {
     svg.append(label)
   }
 
-  // Series. Break the path across gaps longer than three buckets so downtime shows as a gap.
-  const gapMs = history.bucketSeconds * 3000 + 60_000
+  // Flight markers: one vertical line per scheduled flight, drawn before the lot series so
+  // real occupancy lines always paint on top. Disabled for now (FLIGHTS_CHART_MARKERS_ENABLED)
+  // — too cluttered even scoped to short ranges — but left wired up to re-enable later.
+  const flightsOn =
+    FLIGHTS_CHART_MARKERS_ENABLED &&
+    (state.showArrivals || state.showDepartures) &&
+    FLIGHTS_SUPPORTED_RANGES.has(state.range) &&
+    state.flights
+  if (flightsOn) {
+    for (const f of state.flights.flights) {
+      if (f.type === 'arrival' && !state.showArrivals) continue
+      if (f.type === 'departure' && !state.showDepartures) continue
+      const ms = Date.parse(f.scheduledAt)
+      if (ms < sinceMs || ms > untilMs) continue
+      const fx = x(ms)
+      const line = svgEl('line', { x1: fx, x2: fx, y1: m.top, y2: m.top + plotH, class: `flight-line flight-${f.type}` })
+      const title = svgEl('title', {})
+      title.textContent = `${f.type === 'arrival' ? 'Arriving' : 'Departing'} ${fmt.time.format(new Date(ms))} · ${f.airline} ${f.flightNumber} · ${f.city}`
+      line.append(title)
+      svg.append(line)
+    }
+    if (state.showArrivals) legendEntry('Arrivals', 'var(--flight-arrival)', true)
+    if (state.showDepartures) legendEntry('Departures', 'var(--flight-departure)', true)
+  }
+
+  // Series. Break the path only on a real polling outage, not on normal quiet stretches.
+  // Readings are stored on change only (see README), so two genuine, healthy samples for
+  // a lot can legitimately sit 15-20+ minutes apart even though the poller never missed a
+  // beat. Gauging the gap off the chart's display bucket (as small as 60s) broke almost
+  // every segment into its own dash. Gauge it off the poller's real cadence instead, with
+  // enough slack to absorb a few backed-off retries.
+  const pollIntervalMs = state.latest?.poller?.intervalMs ?? 5 * 60_000
+  const gapMs = Math.max(30 * 60_000, pollIntervalMs * 6)
+  const typicalOn = (state.showTypicalDay || state.showTypicalDow) && TYPICAL_SUPPORTED_RANGES.has(state.range)
+  const minDowDays = state.typical?.minDaysForDayOfWeek ?? 3
   const series = lots.map((lot, i) => {
     const color = lotColorVar(lot.lotId, i)
     const pts = lot.points.map(([ts, occ, tot]) => ({ ms: ts * 1000, p: pct(occ, tot), occ, tot }))
@@ -383,9 +636,37 @@ function renderChart(history) {
     }
     if (current.length) runs.push(current)
     const d = runs.map((run) => smoothPath(run.map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))).join(' ')
+
+    // Baselines draw first, so the real reading always sits on top as the clearest line,
+    // even where the two cross. Element refs are kept so hovering a tile can dim every line
+    // belonging to the other lots, baselines included.
+    const dimEls = []
+    if (typicalOn) {
+      const typicalLot = state.typical?.lots.find((l) => l.lotId === lot.lotId)
+      if (typicalLot) {
+        if (state.showTypicalDay) {
+          const dayD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'day').map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))
+          if (dayD) {
+            const dayEl = svgEl('path', { d: dayD, class: 'series typical typical-day', stroke: color })
+            svg.append(dayEl)
+            dimEls.push(dayEl)
+          }
+        }
+        if (state.showTypicalDow) {
+          const dowD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'dow', minDowDays).map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))
+          if (dowD) {
+            const dowEl = svgEl('path', { d: dowD, class: 'series typical typical-dow', stroke: color })
+            svg.append(dowEl)
+            dimEls.push(dowEl)
+          }
+        }
+      }
+    }
+
     const path = svgEl('path', { d, class: 'series', stroke: color })
     svg.append(path)
-    return { lot, color, pts, endY: pts.length ? y(pts[pts.length - 1].p) : null }
+    dimEls.push(path)
+    return { lot, color, pts, endY: pts.length ? y(pts[pts.length - 1].p) : null, dimEls }
   })
 
   // End markers and direct labels, pushed apart so they never collide.
@@ -578,18 +859,77 @@ function renderTable(history) {
   table.append(thead, tbody)
 }
 
+// ---- Flight board --------------------------------------------------------------
+
+// Small paper-plane glyph, rotated to read as landing (nose down-right) or taking off
+// (nose up-right) — the same convention flight-search sites use for arrivals/departures.
+// Colored with the same --flight-arrival/--flight-departure tokens the (currently disabled)
+// chart overlay uses, so the two features share a visual language even while one is off.
+function flightIconSvg(kind) {
+  const rotate = kind === 'arrival' ? 45 : -45
+  const color = kind === 'arrival' ? 'var(--flight-arrival)' : 'var(--flight-departure)'
+  const svg = svgEl('svg', { viewBox: '0 0 24 24', width: 14, height: 14, class: 'flight-icon', 'aria-hidden': 'true' })
+  svg.append(svgEl('path', { d: 'M2 21l21-9L2 3v7l15 2-15 2z', fill: color, transform: `rotate(${rotate} 12 12)` }))
+  return svg
+}
+
+function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows) {
+  const sorted = rows.slice().sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
+  headingEl.replaceChildren(flightIconSvg(kind), document.createTextNode(` ${label} (${sorted.length})`))
+  emptyEl.hidden = sorted.length > 0
+  table.replaceChildren()
+  if (!sorted.length) return
+
+  const thead = document.createElement('thead')
+  const hr = document.createElement('tr')
+  for (const col of ['Time', 'Airline', 'Flight', 'City', 'Gate', 'Status']) {
+    const th = document.createElement('th')
+    th.scope = 'col'
+    th.textContent = col
+    hr.append(th)
+  }
+  thead.append(hr)
+
+  const tbody = document.createElement('tbody')
+  for (const f of sorted) {
+    const tr = document.createElement('tr')
+    // A stale flight fell off the live board without ever reaching a confirmed outcome (see
+    // isFlightStale server-side): showing its last remark as current would be misleading, so
+    // swap it for when we last actually saw it, and dim the row.
+    if (f.stale) tr.classList.add('flight-stale')
+    const status = f.stale ? `Unconfirmed since ${fmt.time.format(new Date(f.lastSeenAt))}` : f.remark || '–'
+    for (const v of [fmt.time.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', status]) {
+      const td = document.createElement('td')
+      td.textContent = v
+      tr.append(td)
+    }
+    tbody.append(tr)
+  }
+  table.append(thead, tbody)
+}
+
+function renderFlightsBoard(data) {
+  const total = data.flights.length
+  els.flightsBoardSub.textContent = total
+    ? `${total.toLocaleString()} flight${total === 1 ? '' : 's'}, ${fmt.dateTime.format(new Date(data.sinceAt))} to ${fmt.dateTime.format(new Date(data.untilAt))}.`
+    : `No flights ${fmt.dateTime.format(new Date(data.sinceAt))} to ${fmt.dateTime.format(new Date(data.untilAt))}.`
+  renderFlightsColumn(els.arrivalsTable, els.arrivalsEmpty, els.arrivalsHeading, 'arrival', 'Arrivals', data.flights.filter((f) => f.type === 'arrival'))
+  renderFlightsColumn(els.departuresTable, els.departuresEmpty, els.departuresHeading, 'departure', 'Departures', data.flights.filter((f) => f.type === 'departure'))
+}
+
 // ---- Orchestration -------------------------------------------------------------
 
 async function loadLatest() {
   try {
-    // Trend history is a fixed short window, independent of the chart's range selector,
-    // so the tile trend badges don't shift when you switch the chart to 7d/30d/all.
-    const [latest, trend] = await Promise.all([
+    // This 24h/1-min-bucket fetch is independent of the chart's range selector, so the tile
+    // trend badges and the v2 24h bar chart don't shift when you switch the chart to 7d/30d/all.
+    const [latest, mini] = await Promise.all([
       getJson('/api/latest'),
-      getJson(`/api/history?range=${TREND_RANGE}`),
+      getJson(`/api/history?range=${MINI_HISTORY_RANGE}`),
     ])
     state.latest = latest
-    renderTiles(latest, trend)
+    renderTiles(latest, mini)
+    renderTilesV2(latest, mini)
     renderSourceLine(latest)
   } catch (err) {
     els.sourceLine.textContent = `Could not reach the service (${err.message})`
@@ -600,6 +940,18 @@ async function loadHistory() {
   els.chartWrap.classList.add('loading')
   try {
     state.history = await getJson(`/api/history?range=${encodeURIComponent(state.range)}`)
+    // The flight board (and, if re-enabled, the chart's flight-line overlay) both track
+    // whatever window the range selector just resolved, so one fetch feeds both.
+    const sinceTs = Math.floor(Date.parse(state.history.sinceAt) / 1000)
+    const untilTs = Math.floor(Date.parse(state.history.untilAt) / 1000)
+    try {
+      state.flights = await getJson(`/api/flights?since=${sinceTs}&until=${untilTs}`)
+      renderFlightsBoard(state.flights)
+    } catch (err) {
+      state.flights = null // the chart overlay is a nice-to-have; failure shouldn't break it
+      els.flightsBoardSub.textContent = `Could not load flights (${err.message})`
+    }
+    updateFlightsAvailability()
     renderChart(state.history)
     renderTable(state.history)
   } catch (err) {
@@ -609,6 +961,77 @@ async function loadHistory() {
     els.chartWrap.classList.remove('loading')
   }
 }
+
+async function loadTypical() {
+  try {
+    state.typical = await getJson('/api/typical')
+  } catch {
+    // Baselines are a nice-to-have; a failed fetch shouldn't take down the main chart.
+    state.typical = null
+  }
+  updateTypicalAvailability()
+  if (state.view === 'chart' && state.history) renderChart(state.history)
+}
+
+// Hides the whole toggle group on ranges it doesn't support, and independently disables
+// "Same weekday" until at least one weekday has enough distinct historical days to average.
+// "Typical day" only needs *some* data, so it's enabled as soon as the fetch succeeds.
+function updateTypicalAvailability() {
+  const supported = TYPICAL_SUPPORTED_RANGES.has(state.range)
+  els.typicalGroup.hidden = !supported
+  if (!supported) return
+
+  const dayBtn = els.typicalGroup.querySelector('[data-typical="day"]')
+  const dowBtn = els.typicalGroup.querySelector('[data-typical="dow"]')
+  const hasTypical = !!state.typical
+
+  dayBtn.disabled = !hasTypical
+  dayBtn.setAttribute('aria-pressed', String(state.showTypicalDay))
+
+  const minDays = state.typical?.minDaysForDayOfWeek ?? 3
+  const dowReady = hasTypical && state.typical.lots.some((l) => l.dayOfWeek.some((d) => d.days >= minDays))
+  dowBtn.disabled = !dowReady
+  dowBtn.title = dowReady
+    ? "Overlay each lot's average occupancy for this weekday only."
+    : `Still collecting: needs at least ${minDays} weeks of same-weekday data.`
+  dowBtn.setAttribute('aria-pressed', String(state.showTypicalDow))
+}
+
+els.typicalGroup.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-typical]')
+  if (!btn || btn.disabled) return
+  const key = btn.dataset.typical
+  const on = btn.getAttribute('aria-pressed') !== 'true'
+  btn.setAttribute('aria-pressed', String(on))
+  if (key === 'day') state.showTypicalDay = on
+  else state.showTypicalDow = on
+  try { localStorage.setItem(`sba-typical-${key}`, on ? '1' : '0') } catch {}
+  if (state.view === 'chart' && state.history) renderChart(state.history)
+})
+
+// Hides the group on ranges it doesn't support (see FLIGHTS_SUPPORTED_RANGES). No data-
+// readiness gating like the typical toggles need — a flight either falls in the window or
+// it doesn't — so this just reflects current toggle state onto the buttons.
+function updateFlightsAvailability() {
+  if (!FLIGHTS_CHART_MARKERS_ENABLED) { els.flightsGroup.hidden = true; return }
+  const supported = FLIGHTS_SUPPORTED_RANGES.has(state.range)
+  els.flightsGroup.hidden = !supported
+  if (!supported) return
+  els.flightsGroup.querySelector('[data-flights="arrival"]').setAttribute('aria-pressed', String(state.showArrivals))
+  els.flightsGroup.querySelector('[data-flights="departure"]').setAttribute('aria-pressed', String(state.showDepartures))
+}
+
+els.flightsGroup.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-flights]')
+  if (!btn) return
+  const key = btn.dataset.flights
+  const on = btn.getAttribute('aria-pressed') !== 'true'
+  btn.setAttribute('aria-pressed', String(on))
+  if (key === 'arrival') state.showArrivals = on
+  else state.showDepartures = on
+  try { localStorage.setItem(`sba-flights-${key}`, on ? '1' : '0') } catch {}
+  if (state.view === 'chart' && state.history) renderChart(state.history)
+})
 
 function setPressed(group, attr, value) {
   for (const b of group.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset[attr] === value))
@@ -620,6 +1043,8 @@ $('range-group').addEventListener('click', (ev) => {
   state.range = btn.dataset.range
   setPressed($('range-group'), 'range', state.range)
   try { localStorage.setItem('sba-range', state.range) } catch {}
+  updateTypicalAvailability()
+  updateFlightsAvailability()
   loadHistory()
 })
 $('view-group').addEventListener('click', (ev) => {
@@ -627,8 +1052,8 @@ $('view-group').addEventListener('click', (ev) => {
   if (!btn) return
   state.view = btn.dataset.view
   setPressed($('view-group'), 'view', state.view)
-  els.chartCard.hidden = state.view !== 'chart'
-  els.tableCard.hidden = state.view !== 'table'
+  els.chartWrap.hidden = state.view !== 'chart'
+  els.tableWrap.hidden = state.view !== 'table'
   if (state.view === 'chart' && state.history) renderChart(state.history)
 })
 
@@ -644,15 +1069,30 @@ try {
     state.range = saved
     setPressed($('range-group'), 'range', saved)
   }
+  const savedDay = localStorage.getItem('sba-typical-day')
+  if (savedDay !== null) state.showTypicalDay = savedDay === '1'
+  const savedDow = localStorage.getItem('sba-typical-dow')
+  if (savedDow !== null) state.showTypicalDow = savedDow === '1'
+  const savedArrivals = localStorage.getItem('sba-flights-arrival')
+  if (savedArrivals !== null) state.showArrivals = savedArrivals === '1'
+  const savedDepartures = localStorage.getItem('sba-flights-departure')
+  if (savedDepartures !== null) state.showDepartures = savedDepartures === '1'
 } catch {}
+updateTypicalAvailability()
+updateFlightsAvailability()
 
 loadLatest()
 loadHistory()
+loadTypical()
 setInterval(() => {
   if (document.visibilityState !== 'visible') return
   loadLatest()
   loadHistory()
 }, REFRESH_MS)
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return
+  loadTypical()
+}, TYPICAL_REFRESH_MS)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') { loadLatest(); loadHistory() }
 })

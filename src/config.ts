@@ -22,4 +22,14 @@ export const config = {
   userAgent:
     env.USER_AGENT ??
     'sba-parking-tracker/0.1 (personal parking availability tracker; set USER_AGENT to add contact info)',
+
+  // Flight schedule feed. This backs the "Real-Time Arrivals/Departures" widget embedded on
+  // the airport's own arrivals-departures page (an iframe to Infax's hosted FIDS product), so
+  // it's data the airport itself chose to publish, even though it lives on a different host
+  // than the parking feed. Found the same way: reading the page's own JS for its AJAX call.
+  // It's a live board (today's flights only), not a history, so there's nothing to correlate
+  // against parking occupancy until this has been polled and stored for a while.
+  flightsPollEnabled: env.POLL_FLIGHTS !== '0',
+  flightsPollIntervalMs: positiveInt(env.FLIGHTS_POLL_INTERVAL_MS, 15 * 60_000),
+  flightsSourceUrl: env.FLIGHTS_SOURCE_URL ?? 'https://infax.com/webfids/sba/fids-sba.json',
 } as const

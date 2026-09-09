@@ -5,7 +5,8 @@ import { extname, join, normalize, resolve, sep } from 'node:path'
 import { config } from './config.ts'
 import type { ParkingStore } from './store.ts'
 import { statusFor } from './status.ts'
-import { isoFromEpochSeconds } from './time.ts'
+import { isoFromEpochSeconds, localMidnightMs, nextLocalMidnightMs } from './time.ts'
+import { computeTypical, type TypicalLot } from './typical.ts'
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -19,14 +20,28 @@ const MIME: Record<string, string> = {
 }
 
 // Range presets: window length and bucket size. Buckets keep the payload small on long ranges.
+// `seconds` is unused for 'today' and 'all' — both compute their own since/until below.
 const RANGES: Record<string, { seconds: number; bucket: number }> = {
   '6h': { seconds: 6 * 3600, bucket: 60 },
-  '24h': { seconds: 24 * 3600, bucket: 60 },
+  '24h': { seconds: 24 * 3600, bucket: 60 }, // rolling trailing 24h; kept for internal/API use
+  today: { seconds: 0, bucket: 60 }, // the chart's "24h" button: local midnight to midnight
   '7d': { seconds: 7 * 86400, bucket: 15 * 60 },
   '30d': { seconds: 30 * 86400, bucket: 3600 },
   '90d': { seconds: 90 * 86400, bucket: 3 * 3600 },
   all: { seconds: 0, bucket: 0 },
 }
+
+// "Typical day" / "typical day-of-week" baselines average over a rolling window, not all
+// history, so the reference line tracks recent patterns (a rate change, a schedule shift)
+// rather than getting diluted by month-old data forever.
+const TYPICAL_WINDOW_SECONDS = 90 * 86400
+// Below this many distinct same-weekday days, a day-of-week average is really just "repeat
+// last Tuesday" dressed up as a trend. The frontend disables that toggle under this line.
+const MIN_DAYS_FOR_DAY_OF_WEEK = 3
+// Recomputing this is a full scan of up to 90 days of readings; cache it briefly so several
+// clients (or one client's 30-minute refresh) don't each pay for it on every request.
+const TYPICAL_CACHE_MS = 5 * 60_000
+let typicalCache: { at: number; payload: unknown } | null = null
 
 class BadRequest extends Error {}
 
@@ -85,7 +100,15 @@ async function historyPayload(db: ParkingStore, url: URL) {
 
   const now = Math.floor(Date.now() / 1000)
   let sinceTs = preset.seconds > 0 ? now - preset.seconds : 0
+  let untilTs = now
   let bucket = preset.bucket
+  if (rangeKey === 'today') {
+    // Fixed calendar-day window, not "now minus 24h": the axis spans the whole day so a flight
+    // scheduled for 9pm still has a place to land even before it happens. Later hours (and any
+    // flight markers in them) just have no occupancy data yet.
+    sinceTs = Math.floor(localMidnightMs(Date.now(), config.sourceTimeZone) / 1000)
+    untilTs = Math.floor(nextLocalMidnightMs(Date.now(), config.sourceTimeZone) / 1000)
+  }
   if (rangeKey === 'all') {
     const stats = await db.stats()
     const span = stats.earliest_ts === null ? 0 : now - stats.earliest_ts
@@ -108,11 +131,94 @@ async function historyPayload(db: ParkingStore, url: URL) {
   return {
     range: rangeKey,
     sinceAt: isoFromEpochSeconds(sinceTs),
-    untilAt: isoFromEpochSeconds(now),
+    untilAt: isoFromEpochSeconds(untilTs),
     bucketSeconds: bucket,
     timeZone: config.sourceTimeZone,
     // points: [epochSeconds, occupied, total]
     lots: [...lots.values()].sort((a, b) => a.lotId.localeCompare(b.lotId)),
+  }
+}
+
+async function typicalPayload(db: ParkingStore) {
+  if (typicalCache && Date.now() - typicalCache.at < TYPICAL_CACHE_MS) return typicalCache.payload
+
+  const now = Math.floor(Date.now() / 1000)
+  const sinceTs = Math.max(0, now - TYPICAL_WINDOW_SECONDS)
+  const rows = await db.typicalRaw(sinceTs)
+  const lots: TypicalLot[] = computeTypical(rows, config.sourceTimeZone)
+
+  const payload = {
+    sinceAt: isoFromEpochSeconds(sinceTs),
+    untilAt: isoFromEpochSeconds(now),
+    timeZone: config.sourceTimeZone,
+    minDaysForDayOfWeek: MIN_DAYS_FOR_DAY_OF_WEEK,
+    lots,
+  }
+  typicalCache = { at: Date.now(), payload }
+  return payload
+}
+
+// Diagnostic view of the flights feed: poller health, storage stats, and today's board so
+// far. No correlation or prediction here on purpose — there isn't enough history yet to say
+// anything about parking surges; this just proves the second poller is alive and storing.
+// A flight is "stale" once it's past due and hasn't been reconfirmed in a couple of poll
+// cycles — the live board (see flights-source.ts) simply drops completed arrivals rather than
+// marking them done, unlike departures, which get a "DEPARTED" remark. So an old, unconfirmed
+// "ON TIME" almost always means the flight fell off the board, not that it's still pending.
+// A flight that already reached a terminal remark is never stale, no matter how long ago that
+// was: that's a confirmed outcome, not a guess.
+const FLIGHT_TERMINAL_REMARKS = new Set(['departed', 'landed', 'arrived', 'cancelled', 'canceled'])
+function isFlightStale(scheduledTs: number, lastSeenUtc: string, remark: string, nowMs: number): boolean {
+  if (FLIGHT_TERMINAL_REMARKS.has(remark.trim().toLowerCase())) return false
+  const pastDue = nowMs > scheduledTs * 1000 + config.flightsPollIntervalMs
+  const unconfirmed = nowMs - Date.parse(lastSeenUtc) > config.flightsPollIntervalMs * 2
+  return pastDue && unconfirmed
+}
+
+async function flightsPayload(db: ParkingStore, url: URL) {
+  const nowMs = Date.now()
+  // Default window is today's local calendar day — the same span the flights page and the
+  // chart's "today" range use. Pass explicit `since`/`until` (epoch seconds) to ask for a
+  // different window, which is how the occupancy chart requests flights for 6h/7d views.
+  const sinceParam = url.searchParams.get('since')
+  const untilParam = url.searchParams.get('until')
+  const sinceTs = sinceParam !== null ? Number(sinceParam) : Math.floor(localMidnightMs(nowMs, config.sourceTimeZone) / 1000)
+  const untilTs = untilParam !== null ? Number(untilParam) : Math.floor(nextLocalMidnightMs(nowMs, config.sourceTimeZone) / 1000)
+  if (!Number.isFinite(sinceTs) || !Number.isFinite(untilTs) || untilTs < sinceTs) {
+    throw new BadRequest('since/until must be epoch seconds, with until >= since')
+  }
+
+  const [rows, last, stats] = await Promise.all([db.flightsInRange(sinceTs, untilTs), db.lastFlightPoll(), db.flightStats()])
+  return {
+    generatedAt: new Date().toISOString(),
+    timeZone: config.sourceTimeZone,
+    sinceAt: isoFromEpochSeconds(sinceTs),
+    untilAt: isoFromEpochSeconds(untilTs),
+    poller: {
+      enabled: config.flightsPollEnabled,
+      intervalMs: config.flightsPollIntervalMs,
+      lastPollAt: last?.ts_utc ?? null,
+      lastPollOk: last ? last.ok === 1 : null,
+      lastError: last?.error ?? null,
+      failedLast24h: stats.failed_polls_24h,
+    },
+    history: {
+      flights: stats.flights,
+      earliestAt: stats.earliest_ts === null ? null : isoFromEpochSeconds(stats.earliest_ts),
+      latestAt: stats.latest_ts === null ? null : isoFromEpochSeconds(stats.latest_ts),
+    },
+    flights: rows.map((r) => ({
+      type: r.type === 'A' ? 'arrival' : 'departure',
+      airline: r.airline,
+      flightNumber: r.flight_number,
+      city: r.city,
+      scheduledAt: isoFromEpochSeconds(r.scheduled_ts),
+      gate: r.gate,
+      remark: r.remark,
+      lastSeenAt: r.last_seen_utc,
+      stale: isFlightStale(r.scheduled_ts, r.last_seen_utc, r.remark, nowMs),
+    })),
+    notes: ["Live flight board, not a schedule archive. Source: Infax's FIDS widget, embedded on the airport's own arrivals-departures page."],
   }
 }
 
@@ -153,6 +259,8 @@ export function createServer(db: ParkingStore): http.Server {
       }
       if (url.pathname === '/api/latest') return sendJson(res, 200, await latestPayload(db))
       if (url.pathname === '/api/history') return sendJson(res, 200, await historyPayload(db, url))
+      if (url.pathname === '/api/typical') return sendJson(res, 200, await typicalPayload(db))
+      if (url.pathname === '/api/flights') return sendJson(res, 200, await flightsPayload(db, url))
       if (url.pathname === '/api/health') {
         const last = await db.lastPoll()
         const stale = last ? Date.now() - Date.parse(last.ts_utc) > config.pollIntervalMs * 3 : true

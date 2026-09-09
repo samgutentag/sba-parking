@@ -12,7 +12,7 @@
   <header class="page-head">
     <div>
       <h1>SBA Parking</h1>
-      <p class="sub">Santa Barbara Airport lot availability, tracked over time.</p>
+      <nav class="page-nav"><a href="#flights-board">Flights ↓</a></nav>
     </div>
     <p class="source-line" id="source-line" aria-live="polite">Loading…</p>
   </header>
@@ -20,58 +20,92 @@
   <main>
     <section class="tiles" id="tiles" aria-label="Current availability"></section>
 
-    <section class="controls" aria-label="Filters">
-      <div class="seg" role="group" aria-label="Time range" id="range-group">
-        <button type="button" data-range="6h">6h</button>
-        <button type="button" data-range="24h" aria-pressed="true">24h</button>
-        <button type="button" data-range="7d">7d</button>
-        <button type="button" data-range="30d">30d</button>
-        <button type="button" data-range="all">All</button>
-      </div>
-      <div class="seg" role="group" aria-label="View" id="view-group">
-        <button type="button" data-view="chart" aria-pressed="true">Chart</button>
-        <button type="button" data-view="table">Table</button>
-      </div>
+    <section class="tiles-v2-wrap" aria-label="Tile design option 2, for comparison">
+      <p class="sub tiles-v2-label">Option 2 — ring chart, trend, and a 24h free-spaces bar chart per lot. Same data as above, for comparison.</p>
+      <div class="tiles" id="tiles-v2"></div>
     </section>
 
-    <section class="card viz-root" id="chart-card">
+    <section class="card viz-root" id="viz-card" aria-label="Occupancy chart and readings table">
       <div class="card-head">
-        <div>
-          <h2>Occupancy</h2>
-          <p class="sub">Percent of spaces occupied. Three lots, one axis.</p>
+        <div class="viz-controls">
+          <div class="seg" role="group" aria-label="Time range" id="range-group">
+            <button type="button" data-range="6h" title="Show the last 6 hours.">6h</button>
+            <button type="button" data-range="today" aria-pressed="true" title="Show today, midnight to midnight.">Today</button>
+            <button type="button" data-range="7d" title="Show the last 7 days.">7d</button>
+            <button type="button" data-range="30d" title="Show the last 30 days.">30d</button>
+            <button type="button" data-range="all" title="Show all recorded history.">All</button>
+          </div>
+          <div class="seg" role="group" aria-label="View" id="view-group">
+            <button type="button" data-view="chart" aria-pressed="true" title="Show the occupancy line chart.">Chart</button>
+            <button type="button" data-view="table" title="Show the raw readings table.">Table</button>
+          </div>
         </div>
-        <ul class="legend" id="legend" role="list" aria-label="Lots"></ul>
+        <div class="card-head-right">
+          <div class="seg typical-group" role="group" aria-label="Reference lines" id="typical-group" hidden>
+            <button type="button" data-typical="day" aria-pressed="false" title="Overlay each lot's average occupancy by hour of day.">Typical day</button>
+            <button type="button" data-typical="dow" aria-pressed="false" title="Overlay each lot's average occupancy for this weekday only.">Same weekday</button>
+          </div>
+          <div class="seg flights-group" role="group" aria-label="Flight markers" id="flights-group" hidden>
+            <button type="button" data-flights="arrival" aria-pressed="false" title="Mark each scheduled arrival as a vertical line.">Arrivals</button>
+            <button type="button" data-flights="departure" aria-pressed="false" title="Mark each scheduled departure as a vertical line.">Departures</button>
+          </div>
+          <ul class="legend" id="legend" role="list" aria-label="Lots"></ul>
+        </div>
       </div>
       <div class="chart-wrap" id="chart-wrap">
         <svg id="chart" role="img" aria-label="Occupancy over time" tabindex="0"></svg>
         <div class="tooltip" id="tooltip" hidden></div>
         <div class="visually-hidden" id="chart-status" aria-live="polite" aria-atomic="true"></div>
+        <p class="empty" id="chart-empty" hidden>No readings in this range yet. The poller stores a new row each time the airport feed changes.</p>
       </div>
-      <p class="empty" id="chart-empty" hidden>No readings in this range yet. The poller stores a new row each time the airport feed changes.</p>
+      <div class="table-wrap" id="table-wrap" hidden>
+        <p class="sub" id="table-sub"></p>
+        <table id="table" aria-label="Readings"></table>
+      </div>
     </section>
 
-    <section class="card" id="table-card" hidden>
+    <section class="card" id="flights-board">
       <div class="card-head">
         <div>
-          <h2 id="table-heading">Readings</h2>
-          <p class="sub" id="table-sub"></p>
+          <h2>Flight board</h2>
+          <p class="sub" id="flights-board-sub">Loading…</p>
         </div>
       </div>
-      <div class="table-wrap">
-        <table id="table" aria-labelledby="table-heading"></table>
+      <div class="flights-cols">
+        <div class="flights-col">
+          <h3 id="arrivals-heading">Arrivals</h3>
+          <div class="table-wrap">
+            <table id="arrivals-table" class="flights-table" aria-labelledby="arrivals-heading"></table>
+          </div>
+          <p class="empty" id="arrivals-empty" hidden>No arrivals in this window.</p>
+        </div>
+        <div class="flights-col">
+          <h3 id="departures-heading">Departures</h3>
+          <div class="table-wrap">
+            <table id="departures-table" class="flights-table" aria-labelledby="departures-heading"></table>
+          </div>
+          <p class="empty" id="departures-empty" hidden>No departures in this window.</p>
+        </div>
       </div>
     </section>
+  </main>
 
-    <div class="callout" role="note">
+  <footer class="page-foot">
+    <details class="about-data">
+      <summary>About the data</summary>
       <p><strong>ADA parking</strong> is held in the short-term and long-term lots, even when a lot shows full,
         and isn't included in the counts above. Cell-phone lots for pickups, bike racks near the terminal
         entrances. No RVs on airport property.</p>
       <p id="history-line"></p>
-      <p>Data comes from the airport's own feed at
+      <p>Parking data comes from the airport's own feed at
         <a href="https://flysba.santabarbaraca.gov/airport/parking">flysba.santabarbaraca.gov</a>,
         which refreshes about every three minutes. Times are Pacific.</p>
-    </div>
-  </main>
+      <p>Flight data is tracking only, no predictions yet. Source: Infax's FIDS widget, embedded on the
+        airport's own <a href="https://flysba.santabarbaraca.gov/flights/arrivals-departures-0">arrivals &amp; departures page</a>.
+        Live board, not a schedule archive — this reads back what's already been polled and stored.</p>
+    </details>
+    <p class="built-by">Built on a ✈️ by <a href="https://gutentag.world/?utm_source=sba-parking" target="_blank" rel="noopener noreferrer">Sam Gutentag</a></p>
+  </footer>
 
   <script src="/app.js"></script>
 </body>

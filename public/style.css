@@ -21,6 +21,10 @@
   --status-critical: #d03b3b;
   --tooltip-bg: #ffffff;
   --shadow: 0 6px 24px rgba(11, 11, 11, 0.12);
+  /* Flight markers: deliberately outside the series-1..6 hue family so they read as an
+     annotation layer, not a 4th/5th data series. */
+  --flight-arrival: #7c6fd1;
+  --flight-departure: #0e8f8f;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -42,6 +46,8 @@
     --series-6: #008300;
     --tooltip-bg: #242423;
     --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    --flight-arrival: #a79ef0;
+    --flight-departure: #2dd4d4;
   }
 }
 
@@ -69,6 +75,9 @@ a { color: inherit; text-decoration-color: var(--muted); }
   display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap;
   margin-bottom: 22px;
 }
+.page-nav { margin-top: 4px; }
+.page-nav a { font-size: 14px; color: var(--ink-2); text-decoration: none; }
+.page-nav a:hover { color: var(--ink); text-decoration: underline; }
 .source-line { margin: 0; color: var(--ink-2); font-size: 14px; text-align: right; }
 .source-line .dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -86,7 +95,9 @@ a { color: inherit; text-decoration-color: var(--muted); }
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   padding: 16px 18px 14px; display: grid; gap: 6px;
   border-top: 3px solid var(--lot-color, var(--axis));
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
+.tile:hover, .tile-v2:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
 .tile .label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: 14px; }
 .tile .value { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .tile .value-main { font-size: 44px; font-weight: 600; line-height: 1.05; letter-spacing: -0.02em; }
@@ -109,18 +120,53 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .meter { height: 6px; border-radius: 3px; background: color-mix(in oklab, var(--chip-color) 22%, var(--surface)); overflow: hidden; margin-top: 4px; }
 .meter > span { display: block; height: 100%; background: var(--chip-color); border-radius: 3px; }
 
-.callout {
+/* Stat tiles, v2: ring chart + trend on the left, count + 24h bar chart on the right.
+   A comparison layout sitting under the v1 row, same underlying data. */
+.tiles-v2-wrap { margin-bottom: 18px; }
+.tiles-v2-label { margin: 0 0 8px; }
+.tile-v2 {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px 14px; display: grid; gap: 12px;
+  border-top: 3px solid var(--lot-color, var(--axis));
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.tile-v2 .label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: 14px; }
+.v2-grid { display: flex; gap: 18px; align-items: flex-start; }
+.v2-col { display: flex; flex-direction: column; gap: 8px; }
+.v2-col-ring { align-items: flex-start; }
+.v2-col-detail { flex: 1; min-width: 0; }
+.v2-col-detail .value-main { display: block; font-size: 32px; font-weight: 600; line-height: 1.05; letter-spacing: -0.02em; }
+.v2-col-detail .value-main small { display: block; font-size: 13px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-top: 2px; }
+.ring-track { fill: none; stroke: var(--grid); stroke-width: 8; }
+.ring-value { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dasharray 0.3s ease; }
+.ring-label { fill: var(--ink); font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.hour-bars {
+  display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 4px;
+  border-bottom: 1px solid var(--border); padding-bottom: 1px;
+}
+.hour-bars .bar { flex: 1; background: var(--lot-color, var(--axis)); border-radius: 1px 1px 0 0; min-height: 2px; opacity: 0.7; }
+.hour-bars .bar:last-child { opacity: 1; } /* the current hour */
+.hour-bars .bar-empty { background: var(--grid); opacity: 1; }
+
+/* Footer: the old inline "about this data" callout now lives behind a disclosure so the page
+   ends with the flight board, not a wall of caveats. */
+.page-foot { margin-top: 8px; padding-top: 4px; }
+.about-data {
   background: var(--wash); border: 1px solid var(--border); border-left: 3px solid var(--axis);
   border-radius: 8px; padding: 12px 16px; color: var(--ink-2); font-size: 13px; line-height: 1.5;
 }
-.callout p { margin: 6px 0; }
-.callout p:first-child { margin-top: 0; }
-.callout p:last-child { margin-bottom: 0; }
-.callout strong { color: var(--ink); }
+.about-data summary { cursor: pointer; font-weight: 600; color: var(--ink); }
+.about-data[open] summary { margin-bottom: 8px; }
+.about-data p { margin: 6px 0; }
+.about-data p:last-child { margin-bottom: 0; }
+.about-data strong { color: var(--ink); }
+.built-by { margin: 14px 0 0; color: var(--muted); font-size: 13px; text-align: center; }
+.built-by a { color: inherit; }
 
-/* Controls */
-.controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-.seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 3px; gap: 2px; }
+/* Controls: now live in the viz card's own header, upper-left, in place of a title. */
+.viz-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.card-head-right { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+.seg { display: inline-flex; background: var(--page); border: 1px solid var(--border); border-radius: 9px; padding: 3px; gap: 2px; }
 .seg button {
   font: inherit; font-size: 13px; font-weight: 500; color: var(--ink-2); background: transparent; border: 0;
   padding: 5px 11px; border-radius: 6px; cursor: pointer;
@@ -128,6 +174,9 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .seg button:hover { background: var(--wash); }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
 .seg button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+.seg button:disabled { color: var(--muted); cursor: not-allowed; opacity: 0.6; }
+.seg button:disabled:hover { background: transparent; }
+.typical-group { font-size: 12px; }
 
 /* Cards */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 12px; margin-bottom: 18px; }
@@ -135,6 +184,7 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .legend { list-style: none; margin: 0; padding: 0; display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
 .legend li { display: inline-flex; align-items: center; gap: 7px; }
 .legend .key { width: 18px; height: 2px; background: var(--c); border-radius: 1px; }
+.legend .key-dashed { background: none; border-top: 2px dashed var(--c); height: 0; }
 
 .chart-wrap { position: relative; }
 #chart { display: block; width: 100%; height: 340px; overflow: visible; }
@@ -145,7 +195,23 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .threshold { stroke: var(--axis); stroke-width: 1; }
 .tick-label { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .note-label { fill: var(--muted); font-size: 11px; }
-.series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.series { fill: none; stroke-width: 4; stroke-linejoin: round; stroke-linecap: round; transition: opacity 0.15s; }
+/* Baseline reference lines: same lot color, faint and dashed so the real reading always reads
+   as the foreground line. Two distinct dash rhythms so day + same-weekday stay tellable apart
+   when both are on at once. */
+.series.typical { stroke-width: 1.5; pointer-events: none; }
+.series.typical-day { opacity: 0.4; stroke-dasharray: 6 4; }
+.series.typical-dow { opacity: 0.6; stroke-dasharray: 1.5 3.5; }
+/* Hovering a stat tile applies this to every other lot's lines. Overrides whatever opacity
+   the line already had (full-strength main line or a faint typical baseline alike) so the
+   hovered lot reads as clearly stronger than either. */
+.series.dimmed { opacity: 0.3 !important; }
+/* Flight markers: thin dashed verticals, quiet enough to sit behind the lot lines. Direction
+   is told apart by color and by the native <title> tooltip on hover, not by dash rhythm —
+   two different dash patterns at this thinness read as noise, not signal. */
+.flight-line { stroke-width: 1; opacity: 0.55; stroke-dasharray: 3 3; pointer-events: stroke; cursor: help; }
+.flight-arrival { stroke: var(--flight-arrival); }
+.flight-departure { stroke: var(--flight-departure); }
 .end-marker { stroke: var(--surface); stroke-width: 2; }
 .end-label { fill: var(--ink-2); font-size: 12px; }
 .crosshair { stroke: var(--ink-2); stroke-width: 1; pointer-events: none; }
@@ -172,6 +238,17 @@ th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--gr
 th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
 th:first-child, td:first-child { text-align: left; }
 th .key { display: inline-block; width: 12px; height: 2px; background: var(--c); border-radius: 1px; margin-right: 6px; vertical-align: middle; }
+/* Flights table is almost entirely text (airline, city, status), not numbers, so left-align
+   every column rather than fighting the readings table's numeric-right default. */
+/* Flights board is almost entirely text (airline, city, status), not numbers, so left-align
+   every column rather than fighting the readings table's numeric-right default. */
+.flights-table th, .flights-table td { text-align: left; }
+
+.flights-cols { display: flex; gap: 24px; flex-wrap: wrap; }
+.flights-col { flex: 1; min-width: 280px; }
+.flights-col h3 { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--ink-2); margin: 0 0 8px; }
+.flights-col .flight-icon { flex: none; }
+.flights-table tr.flight-stale { color: var(--muted); font-style: italic; }
 
 
 @media (max-width: 560px) {
