@@ -107,6 +107,20 @@ journalctl -u sba-parking -f
 
 Edit `Environment=` lines in the unit for `PORT`, `HOST`, and `USER_AGENT`. The database is a single file; back it up by copying `data/parking.db` while the service runs (WAL mode makes this safe) or with `sqlite3 data/parking.db ".backup out.db"`.
 
+## Public URL: sba-parking.gutentag.world
+
+Served from the same Pi via its own Cloudflare Tunnel, kept completely separate from any other
+tunnel on that box (this Pi also runs a family call center, which must never be interrupted by
+changes here):
+
+- Tunnel name `sba-parking`, its own credentials file under `~/.cloudflared/`, its own config at
+  `/etc/cloudflared/sba-parking-config.yml` (ingress: `sba-parking.gutentag.world` → `http://localhost:3210`).
+- Its own systemd unit, `cloudflared-sba-parking.service`, running that config. Deliberately not
+  reusing the box's existing `cloudflared.service`: that one is the call center's tunnel, and
+  restarting it to pick up a config change would have interrupted it too, however briefly.
+- Redeploying code here: `cd /opt/sba-parking && git pull && sudo systemctl restart sba-parking`.
+  That only touches this app's own service, never the tunnel services or the call center.
+
 ## Cloudflare Workers port (planned)
 
 The module boundaries map directly:
