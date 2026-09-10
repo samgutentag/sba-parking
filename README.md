@@ -1,6 +1,6 @@
 # SBA Parking
 
-Tracks how many spaces are free in Santa Barbara Airport's three public lots, stores every change the airport's feed publishes, and serves a small page that shows current status plus occupancy over time.
+Tracks how many spaces are open in Santa Barbara Airport's three public lots, stores every change the airport's feed publishes, and serves a small page that shows current availability, a chart of open spots over time, and the airport's own flight board tracked alongside it.
 
 Zero runtime dependencies. Node 24 covers everything: `fetch`, `node:sqlite`, `node:http`, and native TypeScript type stripping. The only dev dependencies are `typescript` and `@types/node`, used for `pnpm typecheck`.
 
@@ -59,6 +59,8 @@ Also no auth, no key. The airport's own arrivals-departures page embeds a "Real-
 
 This is a **live board, not a schedule archive**: it only ever returns today's (and sometimes tonight's overnight) flights, arrivals and departures mixed (`type` is `A` or `D`). There's no seat count or aircraft type, so a flight count is a proxy for passenger volume, not the real number. The point of tracking this at all is to eventually check whether departure volume in a given window correlates with the parking lots filling up faster, e.g. "5 departures around 9am" — but that's a hypothesis, not a claim this repo makes yet, and won't be worth testing until weeks of paired flight and occupancy data exist. `src/flights-source.ts` parses leniently (skips a malformed row rather than failing the whole poll), unlike the stricter parking parser, since this is a status board that can plausibly emit odd rows.
 
+The board never marks an arrival complete: a departure gets a `DEPARTED` remark, but a finished arrival just silently disappears from the feed instead of getting a `LANDED`-style status. `isFlightStale` (`src/server.ts`) catches this: a flight past its scheduled time that hasn't been reconfirmed in a couple of poll cycles, and whose last remark isn't already a real terminal outcome (`departed`/`landed`/`arrived`/`cancelled`), is flagged `stale` rather than trusted. The flight board (below) uses that flag, plus its own 30-minutes-past-due rule for flights that *did* reach a confirmed outcome, to decide what's still worth showing.
+
 Polled every 15 minutes by default (`FLIGHTS_POLL_INTERVAL_MS`), independently of the parking poller, with the same exponential backoff on failure. Disable with `POLL_FLIGHTS=0`.
 
 ## How it stores data
@@ -84,15 +86,25 @@ Flights are stored the same way, one row per distinct scheduled leg in a separat
 
 | route | returns |
 |---|---|
-| `GET /api/latest` | newest reading per lot with free count, percent, status label, plus poller health and history stats |
-| `GET /api/history?range=6h\|24h\|7d\|30d\|all` | per-lot points `[epochSeconds, occupied, total]`, bucketed by average (1 min, 1 min, 15 min, 1 h, adaptive) |
+| `GET /api/latest` | newest reading per lot with free count, percent, status label (`statusBasis`/`typicalPercent`/`deviationPp` when typical-relative), plus poller health and history stats |
+| `GET /api/history?range=6h\|today\|7d\|30d\|all` | per-lot points `[epochSeconds, occupied, total]`, bucketed by average (1 min, 1 min, 15 min, 1 h, adaptive). `today` is a fixed local calendar day (midnight to midnight), not a rolling window — the axis has room for hours that haven't happened yet |
 | `GET /api/typical` | per-lot hour-of-day and hour-of-day-by-weekday baseline curves, for the chart's dashed reference lines |
-| `GET /api/flights` | flights poller health, storage stats, and the last day's flight board — diagnostic only, no correlation with parking yet |
+| `GET /api/flights?since=&until=` | flights in a window (epoch seconds; defaults to today's local calendar day), plus poller health and storage stats. Each flight carries `stale` (see below) and `lastSeenAt`. Backs the on-page flight board, not just diagnostics |
 | `GET /api/health` | 200 when the last poll is recent, 503 when polling is enabled but stale |
 
 ## Web page
 
-Vanilla HTML, CSS, and JavaScript in `public/`. Stat tile per lot, one occupancy chart with all three lots on a single percent axis, crosshair tooltip, keyboard navigation with arrow keys, a table view, range presets, and light/dark following the system. Lot colors are fixed by lot id so filtering never recolors a series. Refreshes itself every minute while visible.
+Vanilla HTML, CSS, and JavaScript in `public/`, no framework, no build step. Refreshes itself every minute while visible. Light/dark follows the system. Lot colors are fixed by lot id so nothing ever recolors a series.
+
+**Stat tiles.** One per lot: a ring chart and the open-spot count with a 30-minute trend badge in a row, a linear meter underneath, then a 24-hour bar chart of average open spots per hour, then percent-full/parked-count detail and the lot's address and price. The ring, the count, and the bar chart all lead with *availability* (open spots), not occupancy — the only occupancy-framed numbers left on a tile are the status chip and the "% full" detail line, which are about the airport's own occupancy thresholds on purpose.
+
+**Occupancy chart.** All three lots on one axis, but the axis is percent *available*, not percent occupied — higher on the chart means more open parking. (Status labels, tiles, and trend badges still use occupied percent internally; only the chart's own points get flipped, via a small `avail()` helper local to `renderChart`.) The "Limited" reference line sits at 25% available, the same real threshold as 75%+ occupied. Range presets are `6h`, `Today` (a fixed local calendar day, not a rolling window), `7d`, `30d`, `All`. Hovering shows a crosshair tooltip with each lot's actual open-spot count (not a percent); arrow keys scrub the same way for keyboard users, with a live-region text equivalent since the chart itself is one opaque `role="img"` SVG. Hovering a stat tile dims every other lot's line so the hovered one stands out.
+
+Two dashed reference-line toggles, "Typical day" (blended across all stored days) and "Same weekday" (only same-weekday days), overlay each lot's typical hour-of-day curve; "Same weekday" stays disabled until a lot has enough same-weekday history to mean anything. A third toggle group (per-flight vertical markers for arrivals/departures) exists in the code but is switched off by default (`FLIGHTS_CHART_MARKERS_ENABLED` in `app.js`) — even scoped to short ranges, one day's ~20 flights read as clutter; the flag is a one-line flip to bring it back.
+
+**Flight board.** Two columns, Arrivals and Departures, at the bottom of the page, window tied to whichever chart range is selected. Airline + flight number are one linked cell to that flight's FlightAware page, when the airline maps to a known ICAO code (`AIRLINE_ICAO` in `app.js`); an unmapped airline just renders as text rather than a guessed, possibly-wrong link. Stale flights (see above) and flights that reached a confirmed outcome more than 30 minutes ago both drop off the list silently, no per-row warning, the same way the live source itself just stops listing a finished arrival.
+
+**Footer.** A collapsed "About the data" disclosure (ADA-parking note, data sources, the flight-tracking caveat) instead of always-visible callout text, plus a site credit link.
 
 ## Deploy on a Raspberry Pi
 
@@ -105,7 +117,7 @@ sudo systemctl enable --now sba-parking
 journalctl -u sba-parking -f
 ```
 
-Edit `Environment=` lines in the unit for `PORT`, `HOST`, and `USER_AGENT`. The database is a single file; back it up by copying `data/parking.db` while the service runs (WAL mode makes this safe) or with `sqlite3 data/parking.db ".backup out.db"`.
+Edit `Environment=` lines in the unit for `PORT`, `HOST`, `USER_AGENT`, and, if the defaults don't fit, `POLL_FLIGHTS`/`FLIGHTS_POLL_INTERVAL_MS`. The database is a single file; back it up by copying `data/parking.db` while the service runs (WAL mode makes this safe) or with `sqlite3 data/parking.db ".backup out.db"`.
 
 ## Public URL: sba-parking.gutentag.world
 
@@ -120,6 +132,9 @@ changes here):
   restarting it to pick up a config change would have interrupted it too, however briefly.
 - Redeploying code here: `cd /opt/sba-parking && git pull && sudo systemctl restart sba-parking`.
   That only touches this app's own service, never the tunnel services or the call center.
+- Traffic: Cloudflare Web Analytics, enabled per-hostname in the Cloudflare dashboard
+  (Analytics & Logs → Web Analytics → Automatic setup). No code here, no tracking script in
+  the page; Cloudflare injects the beacon at the edge for this hostname only.
 
 ## Cloudflare Workers port (planned)
 
