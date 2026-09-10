@@ -904,11 +904,20 @@ function flightIconSvg(kind) {
 const FLIGHTS_BOARD_ROW_CAP = 300
 
 function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multiDay) {
-  const sorted = rows.slice().sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
+  // Stale flights (see isFlightStale server-side) fell off the live board without ever
+  // reaching a confirmed outcome. Rather than show a per-row "unconfirmed" warning — which
+  // reads as broken even though it's accurate — this board just drops them silently, the same
+  // way the live source itself drops completed arrivals with no explicit status.
+  const sorted = rows.filter((f) => !f.stale).sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
   headingEl.replaceChildren(flightIconSvg(kind), document.createTextNode(` ${label} (${sorted.length})`))
-  emptyEl.hidden = sorted.length > 0
   table.replaceChildren()
-  if (!sorted.length) return
+
+  if (!sorted.length) {
+    emptyEl.hidden = false
+    emptyEl.textContent = `No ${label.toLowerCase()} in this window.`
+    return
+  }
+  emptyEl.hidden = true
 
   const shown = sorted.slice(0, FLIGHTS_BOARD_ROW_CAP)
   const timeFmt = multiDay ? fmt.dateTime : fmt.time
@@ -926,12 +935,7 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
   const tbody = document.createElement('tbody')
   for (const f of shown) {
     const tr = document.createElement('tr')
-    // A stale flight fell off the live board without ever reaching a confirmed outcome (see
-    // isFlightStale server-side): showing its last remark as current would be misleading, so
-    // swap it for when we last actually saw it, and dim the row.
-    if (f.stale) tr.classList.add('flight-stale')
-    const status = f.stale ? `Unconfirmed since ${timeFmt.format(new Date(f.lastSeenAt))}` : f.remark || '–'
-    for (const v of [timeFmt.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', status]) {
+    for (const v of [timeFmt.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', f.remark || '–']) {
       const td = document.createElement('td')
       td.textContent = v
       tr.append(td)

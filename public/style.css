@@ -249,7 +249,6 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
 .flights-col { flex: 1; min-width: 280px; }
 .flights-col h3 { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--ink-2); margin: 0 0 8px; }
 .flights-col .flight-icon { flex: none; }
-.flights-table tr.flight-stale { color: var(--muted); font-style: italic; }
 
 
 @media (max-width: 560px) {
