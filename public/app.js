@@ -109,9 +109,10 @@ function pct(occupied, total) {
   return total > 0 ? Math.min(100, (occupied / total) * 100) : 0
 }
 // The main chart plots availability, not occupancy: higher on the chart should read as "more
-// parking available," which means the line needs percent-free, not percent-occupied. Every
-// other feature (status labels, tiles, trend badges) keeps using occupied percent as-is — this
-// conversion is scoped to the chart's own local points, applied once at construction.
+// parking available," which means the line needs percent-free, not percent-occupied. Status
+// labels, the meter fill, and trend badges still key off occupied percent (thresholds are
+// defined that way), so this conversion is applied wherever the wording needs to flip, not
+// baked into the underlying value. The tile detail line (below) is one such wording flip.
 function avail(occupiedPct) {
   return 100 - occupiedPct
 }
@@ -303,7 +304,7 @@ function renderTiles(latest, trend) {
     const detail = document.createElement('div')
     detail.className = 'detail'
     const left = document.createElement('span')
-    left.textContent = `${Math.round(lot.percent)}% full · ${lot.occupied.toLocaleString()} parked`
+    left.textContent = `${Math.round(avail(lot.percent))}% available · ${lot.free.toLocaleString()} open`
     const right = document.createElement('span')
     right.textContent = `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
     detail.append(left, right)
