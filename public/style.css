@@ -97,16 +97,20 @@ a { color: inherit; text-decoration-color: var(--muted); }
   border-top: 3px solid var(--lot-color, var(--axis));
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
-.tile:hover, .tile-v2:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
+.tile:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
 .tile .label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: 14px; }
-.tile .value { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.tile .value-main { font-size: 44px; font-weight: 600; line-height: 1.05; letter-spacing: -0.02em; }
-.tile .value-main small { font-size: 15px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-left: 6px; }
 .tile .detail { color: var(--ink-2); font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
 .tile .info {
   color: var(--muted); font-size: 12px; margin: 6px 0 0; padding-top: 6px;
   border-top: 1px solid var(--border); display: grid; gap: 2px;
 }
+/* Middle row: ring | free-of-total count | trend. */
+.tile-mid { display: flex; align-items: center; gap: 12px; margin: 2px 0; }
+.tile-ring { flex: none; }
+.tile-value { flex: 1; min-width: 0; }
+.tile-value .value-main { display: block; font-size: 38px; font-weight: 600; line-height: 1.05; letter-spacing: -0.02em; }
+.tile-value .value-main small { display: block; font-size: 14px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-top: 2px; }
+.tile-trend { flex: none; }
 /* Direction is carried by glyph shape + word, not color, so contrast holds in both themes. */
 .tile .trend { display: flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
 .tile .trend-steady { font-weight: 500; }
@@ -119,24 +123,6 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .chip .glyph { color: var(--chip-color); font-size: 11px; }
 .meter { height: 6px; border-radius: 3px; background: color-mix(in oklab, var(--chip-color) 22%, var(--surface)); overflow: hidden; margin-top: 4px; }
 .meter > span { display: block; height: 100%; background: var(--chip-color); border-radius: 3px; }
-
-/* Stat tiles, v2: ring chart + trend on the left, count + 24h bar chart on the right.
-   A comparison layout sitting under the v1 row, same underlying data. */
-.tiles-v2-wrap { margin-bottom: 18px; }
-.tiles-v2-label { margin: 0 0 8px; }
-.tile-v2 {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-  padding: 16px 18px 14px; display: grid; gap: 12px;
-  border-top: 3px solid var(--lot-color, var(--axis));
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-.tile-v2 .label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: 14px; }
-.v2-grid { display: flex; gap: 18px; align-items: flex-start; }
-.v2-col { display: flex; flex-direction: column; gap: 8px; }
-.v2-col-ring { align-items: flex-start; }
-.v2-col-detail { flex: 1; min-width: 0; }
-.v2-col-detail .value-main { display: block; font-size: 32px; font-weight: 600; line-height: 1.05; letter-spacing: -0.02em; }
-.v2-col-detail .value-main small { display: block; font-size: 13px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-top: 2px; }
 .ring-track { fill: none; stroke: var(--grid); stroke-width: 8; }
 .ring-value { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dasharray 0.3s ease; }
 .ring-label { fill: var(--ink); font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -147,6 +133,23 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .hour-bars .bar { flex: 1; background: var(--lot-color, var(--axis)); border-radius: 1px 1px 0 0; min-height: 2px; opacity: 0.7; }
 .hour-bars .bar:last-child { opacity: 1; } /* the current hour */
 .hour-bars .bar-empty { background: var(--grid); opacity: 1; }
+
+/* Flag-shaped tooltip for hour bars: a small pointed tail under a centered, two-line label.
+   position:fixed + appended to <body> so it floats above every tile regardless of scroll or
+   any tile's own hover transform/stacking context. */
+.bar-tooltip {
+  position: fixed; transform: translate(-50%, -100%); z-index: 50; pointer-events: none;
+  background: var(--tooltip-bg); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: var(--shadow); padding: 6px 10px; text-align: center; white-space: nowrap;
+}
+.bar-tooltip::before, .bar-tooltip::after {
+  content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 6px solid transparent;
+}
+.bar-tooltip::before { border-top-color: var(--border); }
+.bar-tooltip::after { border-top-color: var(--tooltip-bg); margin-top: -1px; }
+.bar-tooltip .bt-hour { color: var(--ink-2); font-size: 11px; }
+.bar-tooltip .bt-value { color: var(--ink); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
 
 /* Footer: the old inline "about this data" callout now lives behind a disclosure so the page
    ends with the flight board, not a wall of caveats. */
@@ -253,7 +256,7 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
 
 @media (max-width: 560px) {
   body { padding-top: 20px; }
-  .tile .value { font-size: 36px; }
+  .tile-value .value-main { font-size: 32px; }
   #chart { height: 280px; }
 }
 @media print {

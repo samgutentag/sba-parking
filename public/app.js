@@ -12,6 +12,24 @@ const LOT_INFO = {
   '3': { address: '500 Fowler Road', price: 'Free 0-10 min · $5/hr after · $32/day max · cards & cash' },
   '4': { address: '500 Fowler Road', price: '$5/hr · $23/day max · cards & cash' },
 }
+// FlightAware's flight-tracker URLs key on the 3-letter ICAO airline code (e.g. "ASA2029"),
+// not the 2-letter IATA code the feed gives us (`ac`, e.g. "AS"). Mapped only for carriers
+// actually seen serving SBA plus a couple of likely regional ones; an airline missing here
+// just renders as plain text instead of a guessed, possibly-wrong link.
+const AIRLINE_ICAO = {
+  AS: 'ASA', // Alaska
+  AA: 'AAL', // American
+  DL: 'DAL', // Delta
+  UA: 'UAL', // United
+  WN: 'SWA', // Southwest
+  XP: 'VXP', // Avelo
+  G4: 'AAY', // Allegiant
+}
+function flightAwareUrl(airlineCode, flightNumber) {
+  const icao = AIRLINE_ICAO[airlineCode]
+  return icao ? `https://www.flightaware.com/live/flight/${icao}${flightNumber}` : null
+}
+
 const STATUS = {
   open: { token: '--status-good', glyph: '✓' },
   busy: { token: '--status-warning', glyph: '◐' },
@@ -33,7 +51,6 @@ const TREND = {
 
 const state = {
   range: 'today',
-  view: 'chart',
   timeZone: 'America/Los_Angeles',
   latest: null,
   history: null,
@@ -61,9 +78,8 @@ const FLIGHTS_CHART_MARKERS_ENABLED = false
 
 const $ = (id) => document.getElementById(id)
 const els = {
-  sourceLine: $('source-line'), tiles: $('tiles'), tilesV2: $('tiles-v2'), legend: $('legend'), chart: $('chart'),
+  sourceLine: $('source-line'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
   chartWrap: $('chart-wrap'), chartEmpty: $('chart-empty'), tooltip: $('tooltip'),
-  tableWrap: $('table-wrap'), table: $('table'), tableSub: $('table-sub'),
   historyLine: $('history-line'), chartStatus: $('chart-status'), typicalGroup: $('typical-group'),
   flightsGroup: $('flights-group'),
   flightsBoardSub: $('flights-board-sub'),
@@ -172,6 +188,7 @@ async function getJson(url) {
 // ---- Tiles -------------------------------------------------------------------
 
 function renderTiles(latest, trend) {
+  hideBarTooltip() // a full re-render replaces the bars a stuck tooltip might be pointing at
   els.tiles.replaceChildren()
   if (!latest.lots.length) {
     const p = document.createElement('p')
@@ -180,6 +197,7 @@ function renderTiles(latest, trend) {
     els.tiles.append(p)
     return
   }
+  const nowMs = Date.now()
   const orderedLots = [...latest.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
   orderedLots.forEach((lot, i) => {
     const level = lot.level ?? levelFor(lot.percent)
@@ -211,34 +229,25 @@ function renderTiles(latest, trend) {
       ? trendFor(lot.percent, trendLotHist.points, TREND_WINDOW_MS, Date.parse(lot.sourceUpdatedAt))
       : null
 
-    const value = document.createElement('div')
-    value.className = 'value'
+    // Middle row: ring | free-of-total count | trend.
+    const mid = document.createElement('div')
+    mid.className = 'tile-mid'
+
+    const ringCol = document.createElement('div')
+    ringCol.className = 'tile-ring'
+    ringCol.append(ringChart(lot.percent, 'var(--chip-color)'))
+
+    const valueCol = document.createElement('div')
+    valueCol.className = 'tile-value'
     const valueMain = document.createElement('span')
     valueMain.className = 'value-main'
     valueMain.textContent = lot.free.toLocaleString()
     const small = document.createElement('small')
     small.textContent = `free of ${lot.total.toLocaleString()}`
     valueMain.append(small)
-    value.append(valueMain)
+    valueCol.append(valueMain)
 
-    const meter = document.createElement('div')
-    meter.className = 'meter'
-    meter.setAttribute('role', 'meter')
-    meter.setAttribute('aria-valuemin', '0')
-    meter.setAttribute('aria-valuemax', '100')
-    meter.setAttribute('aria-valuenow', String(Math.round(lot.percent)))
-    meter.setAttribute('aria-label', `${lot.lotName} occupancy`)
-    const fill = document.createElement('span')
-    fill.style.width = `${Math.min(100, lot.percent)}%`
-    meter.append(fill)
-
-    const detail = document.createElement('div')
-    detail.className = 'detail'
-    const left = document.createElement('span')
-    left.textContent = `${Math.round(lot.percent)}% full · ${lot.occupied.toLocaleString()} parked`
-    const right = document.createElement('span')
-    right.textContent = `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
-    detail.append(left, right)
+    mid.append(ringCol, valueCol)
 
     if (t) {
       const info = TREND[t.key]
@@ -254,10 +263,34 @@ function renderTiles(latest, trend) {
           ? 'Occupancy steady over the last 30 minutes'
           : `Occupancy ${info.label}, ${Math.abs(Math.round(t.delta))} percentage points over the last 30 minutes`,
       )
-      value.append(badge)
+      const trendCol = document.createElement('div')
+      trendCol.className = 'tile-trend'
+      trendCol.append(badge)
+      mid.append(trendCol)
     }
 
-    tile.append(label, value, meter, detail)
+    const meter = document.createElement('div')
+    meter.className = 'meter'
+    meter.setAttribute('role', 'meter')
+    meter.setAttribute('aria-valuemin', '0')
+    meter.setAttribute('aria-valuemax', '100')
+    meter.setAttribute('aria-valuenow', String(Math.round(lot.percent)))
+    meter.setAttribute('aria-label', `${lot.lotName} occupancy`)
+    const fill = document.createElement('span')
+    fill.style.width = `${Math.min(100, lot.percent)}%`
+    meter.append(fill)
+
+    const bars = hourBarsEl(hourlyFreeAverages(trendLotHist, nowMs))
+
+    const detail = document.createElement('div')
+    detail.className = 'detail'
+    const left = document.createElement('span')
+    left.textContent = `${Math.round(lot.percent)}% full · ${lot.occupied.toLocaleString()} parked`
+    const right = document.createElement('span')
+    right.textContent = `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
+    detail.append(left, right)
+
+    tile.append(label, mid, meter, bars, detail)
 
     const info = LOT_INFO[lot.lotId]
     if (info) {
@@ -274,8 +307,6 @@ function renderTiles(latest, trend) {
     els.tiles.append(tile)
   })
 }
-
-// ---- Tiles v2 (comparison layout) ----------------------------------------------
 
 // Small donut: background track + one colored arc for percent occupied, percent centered.
 function ringChart(percent, colorVar) {
@@ -320,6 +351,45 @@ function hourlyFreeAverages(historyLot, nowMs) {
   }))
 }
 
+// A single shared flag-shaped tooltip for every hour bar on the page, positioned per-hover
+// rather than one tooltip element per bar. Custom rather than a native `title` attribute for
+// three things a title tooltip can't do: a pointed flag shape, centered multi-line text, and
+// showing instantly instead of after the browser's built-in hover delay.
+let barTooltipEl = null
+function getBarTooltip() {
+  if (!barTooltipEl) {
+    barTooltipEl = document.createElement('div')
+    barTooltipEl.className = 'bar-tooltip'
+    barTooltipEl.hidden = true
+    document.body.append(barTooltipEl)
+  }
+  return barTooltipEl
+}
+
+function positionBarTooltip(barEl) {
+  const tip = getBarTooltip()
+  const rect = barEl.getBoundingClientRect()
+  tip.style.left = `${rect.left + rect.width / 2}px`
+  tip.style.top = `${rect.top - 8}px`
+}
+
+function showBarTooltip(barEl, hourLabel, valueLabel) {
+  const tip = getBarTooltip()
+  const hourEl = document.createElement('div')
+  hourEl.className = 'bt-hour'
+  hourEl.textContent = hourLabel
+  const valueEl = document.createElement('div')
+  valueEl.className = 'bt-value'
+  valueEl.textContent = valueLabel
+  tip.replaceChildren(hourEl, valueEl)
+  tip.hidden = false
+  positionBarTooltip(barEl)
+}
+
+function hideBarTooltip() {
+  if (barTooltipEl) barTooltipEl.hidden = true
+}
+
 function hourBarsEl(buckets) {
   const wrap = document.createElement('div')
   wrap.className = 'hour-bars'
@@ -331,88 +401,15 @@ function hourBarsEl(buckets) {
     const bar = document.createElement('span')
     bar.className = value === null ? 'bar bar-empty' : 'bar'
     bar.style.height = value === null ? '4%' : `${Math.max(6, (value / max) * 100)}%`
-    // Native title tooltip, three stacked lines: hour of day, the count, then "available".
-    if (value !== null) bar.title = `${fmt.hourOnly.format(new Date(ms))}\n${Math.round(value)}\navailable`
+    if (value !== null) {
+      const hourLabel = fmt.hourOnly.format(new Date(ms))
+      const valueLabel = `${Math.round(value)} available`
+      bar.addEventListener('pointerenter', () => showBarTooltip(bar, hourLabel, valueLabel))
+      bar.addEventListener('pointerleave', hideBarTooltip)
+    }
     wrap.append(bar)
   })
   return wrap
-}
-
-function renderTilesV2(latest, trend) {
-  els.tilesV2.replaceChildren()
-  if (!latest.lots.length) return
-  const nowMs = Date.now()
-  const orderedLots = [...latest.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
-  orderedLots.forEach((lot, i) => {
-    const level = lot.level ?? levelFor(lot.percent)
-    const status = STATUS[level]
-    const tile = document.createElement('article')
-    tile.className = 'tile-v2'
-    tile.dataset.lotId = lot.lotId
-    tile.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
-    tile.style.setProperty('--chip-color', `var(${status.token})`)
-    tile.addEventListener('pointerenter', () => setLotHover(lot.lotId))
-    tile.addEventListener('pointerleave', () => setLotHover(null))
-
-    const label = document.createElement('div')
-    label.className = 'label'
-    const name = document.createElement('span')
-    name.textContent = lot.lotName
-    const chip = document.createElement('span')
-    chip.className = 'chip'
-    chip.title = statusChipTitle(lot)
-    const glyph = document.createElement('span')
-    glyph.className = 'glyph'
-    glyph.setAttribute('aria-hidden', 'true')
-    glyph.textContent = status.glyph
-    chip.append(glyph, document.createTextNode(lot.status))
-    label.append(name, chip)
-
-    const trendLotHist = trend?.lots.find((l) => l.lotId === lot.lotId)
-    const t = trendLotHist
-      ? trendFor(lot.percent, trendLotHist.points, TREND_WINDOW_MS, Date.parse(lot.sourceUpdatedAt))
-      : null
-
-    // Left column: ring, trend underneath.
-    const leftCol = document.createElement('div')
-    leftCol.className = 'v2-col v2-col-ring'
-    leftCol.append(ringChart(lot.percent, 'var(--chip-color)'))
-    if (t) {
-      const info = TREND[t.key]
-      const badge = document.createElement('span')
-      badge.className = `trend trend-${t.key}`
-      const badgeGlyph = document.createElement('span')
-      badgeGlyph.setAttribute('aria-hidden', 'true')
-      badgeGlyph.textContent = info.glyph
-      badge.append(badgeGlyph, document.createTextNode(info.label))
-      badge.setAttribute(
-        'aria-label',
-        t.key === 'steady'
-          ? 'Occupancy steady over the last 30 minutes'
-          : `Occupancy ${info.label}, ${Math.abs(Math.round(t.delta))} percentage points over the last 30 minutes`,
-      )
-      leftCol.append(badge)
-    }
-
-    // Right column: free-of-total count, 24h free-spaces bars underneath.
-    const rightCol = document.createElement('div')
-    rightCol.className = 'v2-col v2-col-detail'
-    const valueMain = document.createElement('span')
-    valueMain.className = 'value-main'
-    valueMain.textContent = lot.free.toLocaleString()
-    const small = document.createElement('small')
-    small.textContent = `free of ${lot.total.toLocaleString()}`
-    valueMain.append(small)
-    rightCol.append(valueMain)
-    rightCol.append(hourBarsEl(hourlyFreeAverages(trendLotHist, nowMs)))
-
-    const grid = document.createElement('div')
-    grid.className = 'v2-grid'
-    grid.append(leftCol, rightCol)
-
-    tile.append(label, grid)
-    els.tilesV2.append(tile)
-  })
 }
 
 function renderSourceLine(latest) {
@@ -822,67 +819,6 @@ function hideTooltip() {
   els.tooltip.hidden = true
 }
 
-// ---- Table -------------------------------------------------------------------
-
-function renderTable(history) {
-  const lots = history.lots
-  const table = els.table
-  table.replaceChildren()
-  const byTs = new Map()
-  lots.forEach((lot, i) => {
-    for (const [ts, occ, tot] of lot.points) {
-      if (!byTs.has(ts)) byTs.set(ts, new Array(lots.length).fill(null))
-      byTs.get(ts)[i] = { occ, tot }
-    }
-  })
-  const times = [...byTs.keys()].sort((a, b) => b - a)
-  els.tableSub.textContent = times.length
-    ? `${times.length.toLocaleString()} rows, one per ${history.bucketSeconds >= 3600 ? `${history.bucketSeconds / 3600} h` : `${history.bucketSeconds / 60} min`} bucket, newest first.`
-    : 'No readings in this range yet.'
-
-  const thead = document.createElement('thead')
-  const hr = document.createElement('tr')
-  const th0 = document.createElement('th')
-  th0.textContent = 'Time (PT)'
-  th0.setAttribute('scope', 'col')
-  hr.append(th0)
-  lots.forEach((lot, i) => {
-    const th = document.createElement('th')
-    th.setAttribute('scope', 'col')
-    th.style.setProperty('--c', lotColorVar(lot.lotId, i))
-    const key = document.createElement('span'); key.className = 'key'
-    th.append(key, document.createTextNode(`${shortName(lot.lotName)} free`))
-    hr.append(th)
-    const th2 = document.createElement('th')
-    th2.setAttribute('scope', 'col')
-    th2.setAttribute('aria-label', `${shortName(lot.lotName)} percent full`)
-    th2.textContent = '%'
-    hr.append(th2)
-  })
-  thead.append(hr)
-  const tbody = document.createElement('tbody')
-  for (const ts of times.slice(0, 2000)) {
-    const tr = document.createElement('tr')
-    const td0 = document.createElement('td')
-    td0.textContent = fmt.dateTime.format(new Date(ts * 1000))
-    tr.append(td0)
-    for (const cell of byTs.get(ts)) {
-      const tdFree = document.createElement('td')
-      const tdPct = document.createElement('td')
-      if (cell) {
-        tdFree.textContent = (cell.tot - cell.occ).toLocaleString()
-        tdPct.textContent = `${Math.round(pct(cell.occ, cell.tot))}%`
-      } else {
-        tdFree.textContent = '–'
-        tdPct.textContent = '–'
-      }
-      tr.append(tdFree, tdPct)
-    }
-    tbody.append(tr)
-  }
-  table.append(thead, tbody)
-}
-
 // ---- Flight board --------------------------------------------------------------
 
 // Small paper-plane glyph, rotated to read as landing (nose down-right) or taking off
@@ -924,7 +860,7 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
 
   const thead = document.createElement('thead')
   const hr = document.createElement('tr')
-  for (const col of ['Time', 'Airline', 'Flight', 'City', 'Gate', 'Status']) {
+  for (const col of ['Time', 'Flight', 'City', 'Gate', 'Status']) {
     const th = document.createElement('th')
     th.scope = 'col'
     th.textContent = col
@@ -935,7 +871,30 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
   const tbody = document.createElement('tbody')
   for (const f of shown) {
     const tr = document.createElement('tr')
-    for (const v of [timeFmt.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', f.remark || '–']) {
+
+    const timeTd = document.createElement('td')
+    timeTd.textContent = timeFmt.format(new Date(f.scheduledAt))
+    tr.append(timeTd)
+
+    // Airline + flight number combined into one cell, linked to FlightAware when the airline
+    // maps to a known ICAO code (see AIRLINE_ICAO) — an unmapped airline just renders as text
+    // rather than guessing a link that might point at the wrong flight.
+    const flightTd = document.createElement('td')
+    const flightLabel = `${f.airline} ${f.flightNumber}`
+    const url = flightAwareUrl(f.airlineCode, f.flightNumber)
+    if (url) {
+      const a = document.createElement('a')
+      a.href = url
+      a.target = '_blank'
+      a.rel = 'noopener noreferrer'
+      a.textContent = flightLabel
+      flightTd.append(a)
+    } else {
+      flightTd.textContent = flightLabel
+    }
+    tr.append(flightTd)
+
+    for (const v of [f.city, f.gate || '–', f.remark || '–']) {
       const td = document.createElement('td')
       td.textContent = v
       tr.append(td)
@@ -948,7 +907,7 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
     const tfoot = document.createElement('tfoot')
     const tr = document.createElement('tr')
     const td = document.createElement('td')
-    td.colSpan = 6
+    td.colSpan = 5
     td.textContent = `Showing the first ${shown.length.toLocaleString()} of ${sorted.length.toLocaleString()} — narrow the chart's range above to see the rest.`
     tr.append(td)
     tfoot.append(tr)
@@ -971,14 +930,13 @@ function renderFlightsBoard(data) {
 async function loadLatest() {
   try {
     // This 24h/1-min-bucket fetch is independent of the chart's range selector, so the tile
-    // trend badges and the v2 24h bar chart don't shift when you switch the chart to 7d/30d/all.
+    // trend badges and 24h bar chart don't shift when you switch the chart to 7d/30d/all.
     const [latest, mini] = await Promise.all([
       getJson('/api/latest'),
       getJson(`/api/history?range=${MINI_HISTORY_RANGE}`),
     ])
     state.latest = latest
     renderTiles(latest, mini)
-    renderTilesV2(latest, mini)
     renderSourceLine(latest)
   } catch (err) {
     els.sourceLine.textContent = `Could not reach the service (${err.message})`
@@ -1013,7 +971,6 @@ async function loadHistory() {
     }
     updateFlightsAvailability()
     renderChart(state.history)
-    renderTable(state.history)
   } catch (err) {
     if (seq !== historyRequestSeq) return
     els.chartEmpty.hidden = false
@@ -1031,7 +988,7 @@ async function loadTypical() {
     state.typical = null
   }
   updateTypicalAvailability()
-  if (state.view === 'chart' && state.history) renderChart(state.history)
+  if (state.history) renderChart(state.history)
 }
 
 // Hides the whole toggle group on ranges it doesn't support, and independently disables
@@ -1067,7 +1024,7 @@ els.typicalGroup.addEventListener('click', (ev) => {
   if (key === 'day') state.showTypicalDay = on
   else state.showTypicalDow = on
   try { localStorage.setItem(`sba-typical-${key}`, on ? '1' : '0') } catch {}
-  if (state.view === 'chart' && state.history) renderChart(state.history)
+  if (state.history) renderChart(state.history)
 })
 
 // Hides the group on ranges it doesn't support (see FLIGHTS_SUPPORTED_RANGES). No data-
@@ -1091,7 +1048,7 @@ els.flightsGroup.addEventListener('click', (ev) => {
   if (key === 'arrival') state.showArrivals = on
   else state.showDepartures = on
   try { localStorage.setItem(`sba-flights-${key}`, on ? '1' : '0') } catch {}
-  if (state.view === 'chart' && state.history) renderChart(state.history)
+  if (state.history) renderChart(state.history)
 })
 
 function setPressed(group, attr, value) {
@@ -1108,20 +1065,10 @@ $('range-group').addEventListener('click', (ev) => {
   updateFlightsAvailability()
   loadHistory()
 })
-$('view-group').addEventListener('click', (ev) => {
-  const btn = ev.target.closest('button[data-view]')
-  if (!btn) return
-  state.view = btn.dataset.view
-  setPressed($('view-group'), 'view', state.view)
-  els.chartWrap.hidden = state.view !== 'chart'
-  els.tableWrap.hidden = state.view !== 'table'
-  if (state.view === 'chart' && state.history) renderChart(state.history)
-})
-
 let resizeTimer
 new ResizeObserver(() => {
   clearTimeout(resizeTimer)
-  resizeTimer = setTimeout(() => { if (state.history && state.view === 'chart') renderChart(state.history) }, 80)
+  resizeTimer = setTimeout(() => { if (state.history) renderChart(state.history) }, 80)
 }).observe(els.chartWrap)
 
 try {

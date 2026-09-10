@@ -233,6 +233,7 @@ async function flightsPayload(db: ParkingStore, url: URL) {
     flights: rows.map((r) => ({
       type: r.type === 'A' ? 'arrival' : 'departure',
       airline: r.airline,
+      airlineCode: r.airline_code,
       flightNumber: r.flight_number,
       city: r.city,
       scheduledAt: isoFromEpochSeconds(r.scheduled_ts),
