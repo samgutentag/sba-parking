@@ -78,7 +78,7 @@ const FLIGHTS_CHART_MARKERS_ENABLED = false
 
 const $ = (id) => document.getElementById(id)
 const els = {
-  sourceLine: $('source-line'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
+  sourceLine: $('source-line'), sourceLineMobile: $('source-line-mobile'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
   chartWrap: $('chart-wrap'), chartEmpty: $('chart-empty'), tooltip: $('tooltip'),
   historyLine: $('history-line'), chartStatus: $('chart-status'), typicalGroup: $('typical-group'),
   flightsGroup: $('flights-group'),
@@ -431,7 +431,12 @@ function renderSourceLine(latest) {
     if (p.lastPollOk === false && p.lastError) text += ` failed (${p.lastError})`
     else if (latest.lots[0]) text += ` · feed updated ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
   }
+  // Rendered twice: once for the header (desktop) and once below the tiles (mobile) — see
+  // .source-line-mobile in style.css. Two elements rather than one repositioned via CSS,
+  // since the header and the tiles section aren't siblings in a layout that `order` could
+  // reorder across.
   els.sourceLine.replaceChildren(dot, document.createTextNode(text))
+  els.sourceLineMobile.replaceChildren(dot.cloneNode(true), document.createTextNode(text))
 
   const h = latest.history
   els.historyLine.textContent = h.readings
@@ -939,7 +944,9 @@ async function loadLatest() {
     renderTiles(latest, mini)
     renderSourceLine(latest)
   } catch (err) {
-    els.sourceLine.textContent = `Could not reach the service (${err.message})`
+    const message = `Could not reach the service (${err.message})`
+    els.sourceLine.textContent = message
+    els.sourceLineMobile.textContent = message
   }
 }
 

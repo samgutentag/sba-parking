@@ -56,6 +56,13 @@
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+/* The browser's own [hidden] default is a normal-priority UA-stylesheet rule, so it loses to
+   ANY author rule that sets display on the same element (e.g. .seg's display: inline-flex on
+   #flights-group / #typical-group) regardless of selector specificity — author rules always
+   beat user-agent rules at equal importance. Reasserted here so el.hidden = true actually
+   hides things everywhere on the page, not just where no other rule happens to set display. */
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 body {
@@ -75,9 +82,6 @@ a { color: inherit; text-decoration-color: var(--muted); }
   display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap;
   margin-bottom: 22px;
 }
-.page-nav { margin-top: 4px; }
-.page-nav a { font-size: 14px; color: var(--ink-2); text-decoration: none; }
-.page-nav a:hover { color: var(--ink); text-decoration: underline; }
 .source-line { margin: 0; color: var(--ink-2); font-size: 14px; text-align: right; }
 .source-line .dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -85,6 +89,11 @@ a { color: inherit; text-decoration-color: var(--muted); }
 }
 .source-line .dot.bad { background: var(--status-critical); }
 .source-line .dot.stale { background: var(--status-warning); }
+/* Same content as the header's source-line, rendered a second time so it can sit below the
+   tiles on mobile instead of the header — the header and the tiles section aren't siblings
+   in a layout flex/grid `order` could reorder across. Only one of the two is ever visible;
+   see the max-width media query below. */
+.source-line-mobile { display: none; text-align: left; margin: 2px 0 18px; }
 
 /* Stat tiles */
 .tiles {
@@ -258,6 +267,8 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
   body { padding-top: 20px; }
   .tile-value .value-main { font-size: 32px; }
   #chart { height: 280px; }
+  .source-line { display: none; }
+  .source-line-mobile { display: block; }
 }
 @media print {
   body { background: #fff; color: #000; }
