@@ -88,6 +88,20 @@ function levelFor(percent) {
   return 'open'
 }
 
+// Explains which of the two classifiers is behind the status chip. Once a lot has enough
+// history, /api/latest switches from a fixed percent-of-capacity band (same for every lot
+// regardless of size) to comparing against that lot's own typical occupancy for this hour —
+// see relativeStatusFor in src/status.ts for why. Surfaced as a tooltip rather than new UI so
+// the tile layout doesn't change the moment a lot crosses the data threshold.
+function statusChipTitle(lot) {
+  if (lot.statusBasis !== 'typical' || lot.typicalPercent === null) {
+    return "Matches the airport's own percent-of-capacity thresholds."
+  }
+  if (lot.deviationPp === null) return `Typically ${Math.round(lot.typicalPercent)}% full at this hour.`
+  const dir = lot.deviationPp >= 0 ? 'busier' : 'quieter'
+  return `${Math.abs(Math.round(lot.deviationPp))} points ${dir} than typical for this hour (typically ${Math.round(lot.typicalPercent)}% full).`
+}
+
 // Compares current percent-occupied to the reading closest to `windowMs` before `nowMs`.
 // Returns null when there's no reading near enough to that target to trust the comparison
 // (for example, right after the poller starts and history is still thin).
@@ -184,6 +198,7 @@ function renderTiles(latest, trend) {
     name.textContent = lot.lotName
     const chip = document.createElement('span')
     chip.className = 'chip'
+    chip.title = statusChipTitle(lot)
     const glyph = document.createElement('span')
     glyph.className = 'glyph'
     glyph.setAttribute('aria-hidden', 'true')
@@ -345,6 +360,7 @@ function renderTilesV2(latest, trend) {
     name.textContent = lot.lotName
     const chip = document.createElement('span')
     chip.className = 'chip'
+    chip.title = statusChipTitle(lot)
     const glyph = document.createElement('span')
     glyph.className = 'glyph'
     glyph.setAttribute('aria-hidden', 'true')
@@ -460,6 +476,14 @@ function smoothPath(pts) {
 // 'dow' looks up that day's own weekday so a Tuesday shows Tuesday's average, a Saturday
 // shows Saturday's. Hours with no historical reading (null) are skipped rather than
 // interpolated, so the dashed line breaks exactly where the source data doesn't cover it.
+// Single source of truth for "is this weekday's typical curve trustworthy yet." Reused by the
+// per-day overlay gating below and by the toggle's enable/disable check, so a future change to
+// the threshold rule (say, requiring distinct weeks rather than distinct days) is a one-line
+// change instead of a find-and-fix across the file.
+function isDowCurveReady(curve, minDays) {
+  return !!curve && curve.days >= minDays
+}
+
 // Days are walked as if every local day were 24 UTC hours; on the two DST-change days a year
 // that's off by an hour, which is fine for a faint reference line. For 'dow', a weekday with
 // fewer than `minDowDays` distinct historical days is treated as having no curve yet, so the
@@ -473,7 +497,7 @@ function typicalOverlayPoints(typicalLot, sinceMs, untilMs, kind, minDowDays = 0
     let curve = kind === 'dow'
       ? typicalLot.dayOfWeek.find((d) => d.weekday === localWeekday(dayStart + 3600_000))
       : typicalLot.day
-    if (kind === 'dow' && curve && curve.days < minDowDays) curve = null
+    if (kind === 'dow' && !isDowCurveReady(curve, minDowDays)) curve = null
     if (curve) {
       for (let h = 0; h < 24; h++) {
         const v = curve.hours[h]
@@ -873,12 +897,21 @@ function flightIconSvg(kind) {
   return svg
 }
 
-function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows) {
+// The board's window now follows the chart's range selector (6h up to All), not just "today",
+// so on 7d+ it can span many days of flights with same-looking times. Past this row count we
+// truncate rather than dump an unbounded table, and past a day span we print the date too so
+// two flights at the same clock time on different days aren't indistinguishable.
+const FLIGHTS_BOARD_ROW_CAP = 300
+
+function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multiDay) {
   const sorted = rows.slice().sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
   headingEl.replaceChildren(flightIconSvg(kind), document.createTextNode(` ${label} (${sorted.length})`))
   emptyEl.hidden = sorted.length > 0
   table.replaceChildren()
   if (!sorted.length) return
+
+  const shown = sorted.slice(0, FLIGHTS_BOARD_ROW_CAP)
+  const timeFmt = multiDay ? fmt.dateTime : fmt.time
 
   const thead = document.createElement('thead')
   const hr = document.createElement('tr')
@@ -891,14 +924,14 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows) {
   thead.append(hr)
 
   const tbody = document.createElement('tbody')
-  for (const f of sorted) {
+  for (const f of shown) {
     const tr = document.createElement('tr')
     // A stale flight fell off the live board without ever reaching a confirmed outcome (see
     // isFlightStale server-side): showing its last remark as current would be misleading, so
     // swap it for when we last actually saw it, and dim the row.
     if (f.stale) tr.classList.add('flight-stale')
-    const status = f.stale ? `Unconfirmed since ${fmt.time.format(new Date(f.lastSeenAt))}` : f.remark || '–'
-    for (const v of [fmt.time.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', status]) {
+    const status = f.stale ? `Unconfirmed since ${timeFmt.format(new Date(f.lastSeenAt))}` : f.remark || '–'
+    for (const v of [timeFmt.format(new Date(f.scheduledAt)), f.airline, f.flightNumber, f.city, f.gate || '–', status]) {
       const td = document.createElement('td')
       td.textContent = v
       tr.append(td)
@@ -906,15 +939,27 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows) {
     tbody.append(tr)
   }
   table.append(thead, tbody)
+
+  if (sorted.length > shown.length) {
+    const tfoot = document.createElement('tfoot')
+    const tr = document.createElement('tr')
+    const td = document.createElement('td')
+    td.colSpan = 6
+    td.textContent = `Showing the first ${shown.length.toLocaleString()} of ${sorted.length.toLocaleString()} — narrow the chart's range above to see the rest.`
+    tr.append(td)
+    tfoot.append(tr)
+    table.append(tfoot)
+  }
 }
 
 function renderFlightsBoard(data) {
   const total = data.flights.length
+  const multiDay = Date.parse(data.untilAt) - Date.parse(data.sinceAt) > 36 * 3600_000
   els.flightsBoardSub.textContent = total
     ? `${total.toLocaleString()} flight${total === 1 ? '' : 's'}, ${fmt.dateTime.format(new Date(data.sinceAt))} to ${fmt.dateTime.format(new Date(data.untilAt))}.`
     : `No flights ${fmt.dateTime.format(new Date(data.sinceAt))} to ${fmt.dateTime.format(new Date(data.untilAt))}.`
-  renderFlightsColumn(els.arrivalsTable, els.arrivalsEmpty, els.arrivalsHeading, 'arrival', 'Arrivals', data.flights.filter((f) => f.type === 'arrival'))
-  renderFlightsColumn(els.departuresTable, els.departuresEmpty, els.departuresHeading, 'departure', 'Departures', data.flights.filter((f) => f.type === 'departure'))
+  renderFlightsColumn(els.arrivalsTable, els.arrivalsEmpty, els.arrivalsHeading, 'arrival', 'Arrivals', data.flights.filter((f) => f.type === 'arrival'), multiDay)
+  renderFlightsColumn(els.departuresTable, els.departuresEmpty, els.departuresHeading, 'departure', 'Departures', data.flights.filter((f) => f.type === 'departure'), multiDay)
 }
 
 // ---- Orchestration -------------------------------------------------------------
@@ -936,18 +981,29 @@ async function loadLatest() {
   }
 }
 
+// Guards against overlapping loadHistory() calls resolving out of order (e.g. clicking two
+// range buttons in quick succession) — only the response matching the most recently *started*
+// request is allowed to touch state or render.
+let historyRequestSeq = 0
+
 async function loadHistory() {
+  const seq = ++historyRequestSeq
   els.chartWrap.classList.add('loading')
   try {
-    state.history = await getJson(`/api/history?range=${encodeURIComponent(state.range)}`)
+    const history = await getJson(`/api/history?range=${encodeURIComponent(state.range)}`)
+    if (seq !== historyRequestSeq) return // a newer request has since started; drop this one
+    state.history = history
     // The flight board (and, if re-enabled, the chart's flight-line overlay) both track
     // whatever window the range selector just resolved, so one fetch feeds both.
     const sinceTs = Math.floor(Date.parse(state.history.sinceAt) / 1000)
     const untilTs = Math.floor(Date.parse(state.history.untilAt) / 1000)
     try {
-      state.flights = await getJson(`/api/flights?since=${sinceTs}&until=${untilTs}`)
+      const flights = await getJson(`/api/flights?since=${sinceTs}&until=${untilTs}`)
+      if (seq !== historyRequestSeq) return
+      state.flights = flights
       renderFlightsBoard(state.flights)
     } catch (err) {
+      if (seq !== historyRequestSeq) return
       state.flights = null // the chart overlay is a nice-to-have; failure shouldn't break it
       els.flightsBoardSub.textContent = `Could not load flights (${err.message})`
     }
@@ -955,10 +1011,11 @@ async function loadHistory() {
     renderChart(state.history)
     renderTable(state.history)
   } catch (err) {
+    if (seq !== historyRequestSeq) return
     els.chartEmpty.hidden = false
     els.chartEmpty.textContent = `Could not load history (${err.message})`
   } finally {
-    els.chartWrap.classList.remove('loading')
+    if (seq === historyRequestSeq) els.chartWrap.classList.remove('loading')
   }
 }
 
@@ -989,7 +1046,7 @@ function updateTypicalAvailability() {
   dayBtn.setAttribute('aria-pressed', String(state.showTypicalDay))
 
   const minDays = state.typical?.minDaysForDayOfWeek ?? 3
-  const dowReady = hasTypical && state.typical.lots.some((l) => l.dayOfWeek.some((d) => d.days >= minDays))
+  const dowReady = hasTypical && state.typical.lots.some((l) => l.dayOfWeek.some((d) => isDowCurveReady(d, minDays)))
   dowBtn.disabled = !dowReady
   dowBtn.title = dowReady
     ? "Overlay each lot's average occupancy for this weekday only."

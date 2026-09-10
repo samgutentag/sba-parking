@@ -4,8 +4,8 @@ import http from 'node:http'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { config } from './config.ts'
 import type { ParkingStore } from './store.ts'
-import { statusFor } from './status.ts'
-import { isoFromEpochSeconds, localMidnightMs, nextLocalMidnightMs } from './time.ts'
+import { relativeStatusFor, statusFor } from './status.ts'
+import { isoFromEpochSeconds, localMidnightMs, localTimeParts, nextLocalMidnightMs } from './time.ts'
 import { computeTypical, type TypicalLot } from './typical.ts'
 
 const MIME: Record<string, string> = {
@@ -38,10 +38,24 @@ const TYPICAL_WINDOW_SECONDS = 90 * 86400
 // Below this many distinct same-weekday days, a day-of-week average is really just "repeat
 // last Tuesday" dressed up as a trend. The frontend disables that toggle under this line.
 const MIN_DAYS_FOR_DAY_OF_WEEK = 3
+// Below this many distinct days of *any* history, a lot's "typical for this hour" is really
+// just "what happened once," so /api/latest falls back to the fixed-percent status instead.
+const MIN_DAYS_FOR_TYPICAL_STATUS = 3
 // Recomputing this is a full scan of up to 90 days of readings; cache it briefly so several
-// clients (or one client's 30-minute refresh) don't each pay for it on every request.
+// clients (or one client's 30-minute refresh) don't each pay for it on every request. Shared
+// by /api/typical and /api/latest so the latter doesn't pay for a second scan on every poll.
 const TYPICAL_CACHE_MS = 5 * 60_000
-let typicalCache: { at: number; payload: unknown } | null = null
+let typicalCache: { at: number; sinceAt: string; untilAt: string; lots: TypicalLot[] } | null = null
+
+async function getTypicalLots(db: ParkingStore): Promise<{ sinceAt: string; untilAt: string; lots: TypicalLot[] }> {
+  if (typicalCache && Date.now() - typicalCache.at < TYPICAL_CACHE_MS) return typicalCache
+  const now = Math.floor(Date.now() / 1000)
+  const sinceTs = Math.max(0, now - TYPICAL_WINDOW_SECONDS)
+  const rows = await db.typicalRaw(sinceTs)
+  const lots = computeTypical(rows, config.sourceTimeZone)
+  typicalCache = { at: Date.now(), sinceAt: isoFromEpochSeconds(sinceTs), untilAt: isoFromEpochSeconds(now), lots }
+  return typicalCache
+}
 
 class BadRequest extends Error {}
 
@@ -56,12 +70,21 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 }
 
 async function latestPayload(db: ParkingStore) {
-  const [rows, last, stats] = await Promise.all([db.latest(), db.lastPoll(), db.stats()])
+  const [rows, last, stats, typical] = await Promise.all([db.latest(), db.lastPoll(), db.stats(), getTypicalLots(db)])
   return {
     generatedAt: new Date().toISOString(),
     timeZone: config.sourceTimeZone,
     lots: rows.map((r) => {
-      const status = statusFor(r.total, r.occupied)
+      const typicalLot = typical.lots.find((l) => l.lotId === r.lot_id)
+      const hour = localTimeParts(r.source_updated_ts, config.sourceTimeZone).hour
+      const status =
+        relativeStatusFor({
+          total: r.total,
+          occupied: r.occupied,
+          typicalPercent: typicalLot?.day.hours[hour] ?? null,
+          days: typicalLot?.days ?? 0,
+          minDays: MIN_DAYS_FOR_TYPICAL_STATUS,
+        }) ?? statusFor(r.total, r.occupied)
       return {
         lotId: r.lot_id,
         lotName: r.lot_name,
@@ -71,6 +94,9 @@ async function latestPayload(db: ParkingStore) {
         percent: status.percent,
         status: status.label,
         level: status.level,
+        statusBasis: status.basis,
+        typicalPercent: status.typicalPercent ?? null,
+        deviationPp: status.deviationPp ?? null,
         sourceUpdated: r.source_updated,
         sourceUpdatedAt: isoFromEpochSeconds(r.source_updated_ts),
         lastSeenAt: r.last_seen_utc,
@@ -140,22 +166,14 @@ async function historyPayload(db: ParkingStore, url: URL) {
 }
 
 async function typicalPayload(db: ParkingStore) {
-  if (typicalCache && Date.now() - typicalCache.at < TYPICAL_CACHE_MS) return typicalCache.payload
-
-  const now = Math.floor(Date.now() / 1000)
-  const sinceTs = Math.max(0, now - TYPICAL_WINDOW_SECONDS)
-  const rows = await db.typicalRaw(sinceTs)
-  const lots: TypicalLot[] = computeTypical(rows, config.sourceTimeZone)
-
-  const payload = {
-    sinceAt: isoFromEpochSeconds(sinceTs),
-    untilAt: isoFromEpochSeconds(now),
+  const { sinceAt, untilAt, lots } = await getTypicalLots(db)
+  return {
+    sinceAt,
+    untilAt,
     timeZone: config.sourceTimeZone,
     minDaysForDayOfWeek: MIN_DAYS_FOR_DAY_OF_WEEK,
     lots,
   }
-  typicalCache = { at: Date.now(), payload }
-  return payload
 }
 
 // Diagnostic view of the flights feed: poller health, storage stats, and today's board so
@@ -180,13 +198,18 @@ async function flightsPayload(db: ParkingStore, url: URL) {
   // Default window is today's local calendar day — the same span the flights page and the
   // chart's "today" range use. Pass explicit `since`/`until` (epoch seconds) to ask for a
   // different window, which is how the occupancy chart requests flights for 6h/7d views.
-  const sinceParam = url.searchParams.get('since')
-  const untilParam = url.searchParams.get('until')
-  const sinceTs = sinceParam !== null ? Number(sinceParam) : Math.floor(localMidnightMs(nowMs, config.sourceTimeZone) / 1000)
-  const untilTs = untilParam !== null ? Number(untilParam) : Math.floor(nextLocalMidnightMs(nowMs, config.sourceTimeZone) / 1000)
-  if (!Number.isFinite(sinceTs) || !Number.isFinite(untilTs) || untilTs < sinceTs) {
-    throw new BadRequest('since/until must be epoch seconds, with until >= since')
+  // `Number('')` is 0, not NaN, so an explicitly-empty param has to be rejected before the
+  // Number() conversion rather than relying on isFinite to catch it afterward.
+  function epochParam(name: string, value: string | null, fallback: number): number {
+    if (value === null) return fallback
+    if (value.trim() === '' || !Number.isFinite(Number(value))) {
+      throw new BadRequest(`${name} must be epoch seconds`)
+    }
+    return Number(value)
   }
+  const sinceTs = epochParam('since', url.searchParams.get('since'), Math.floor(localMidnightMs(nowMs, config.sourceTimeZone) / 1000))
+  const untilTs = epochParam('until', url.searchParams.get('until'), Math.floor(nextLocalMidnightMs(nowMs, config.sourceTimeZone) / 1000))
+  if (untilTs < sinceTs) throw new BadRequest('until must be >= since')
 
   const [rows, last, stats] = await Promise.all([db.flightsInRange(sinceTs, untilTs), db.lastFlightPoll(), db.flightStats()])
   return {

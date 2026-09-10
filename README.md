@@ -33,7 +33,17 @@ Things the code assumes, all lifted from the original research:
 - Every value is a string. Everything is cast and validated in `src/source.ts`.
 - `updated` is `MM/DD/YYYY - HH:MM` with no zone. It is treated as `America/Los_Angeles` and converted to UTC epoch seconds in `src/time.ts`.
 - The feed refreshes about every 3 minutes. ADA spaces are excluded from the counts.
-- Status labels match the airport site's own thresholds: 0 to 49% Open, 50 to 74% Open (busy), 75 to 99% Limited, 100% Full.
+- Status labels match the airport site's own thresholds by default: 0 to 49% Open, 50 to 74%
+  Open (busy), 75 to 99% Limited, 100% Full (`src/status.ts`, `statusFor`). A fixed percent
+  means the same word can describe very different real availability on lots of different
+  sizes — Long-term at 75% still has ~190 open spaces, Short-term at 75% has ~48. Once a lot
+  has at least `MIN_DAYS_FOR_TYPICAL_STATUS` (3) days of history, `/api/latest` switches that
+  lot to `relativeStatusFor`: classify by how far the current reading deviates from *that
+  lot's own* typical percent for the current hour (reusing the `/api/typical` baseline data)
+  instead. 100%+ is always "Full" regardless of which classifier is active. Each lot in
+  `/api/latest` reports which one produced its status via `statusBasis` (`"percent"` or
+  `"typical"`), plus `typicalPercent`/`deviationPp` when it's the latter — surfaced as a
+  tooltip on the status chip in the UI.
 
 The endpoint was found in `window.drupalSettings.citizenParkingData` on the parking page. The page is server-rendered, so there was no XHR to sniff.
 

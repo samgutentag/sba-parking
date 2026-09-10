@@ -243,6 +243,7 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
 /* Flights board is almost entirely text (airline, city, status), not numbers, so left-align
    every column rather than fighting the readings table's numeric-right default. */
 .flights-table th, .flights-table td { text-align: left; }
+.flights-table tfoot td { color: var(--muted); font-size: 12px; white-space: normal; border-bottom: none; }
 
 .flights-cols { display: flex; gap: 24px; flex-wrap: wrap; }
 .flights-col { flex: 1; min-width: 280px; }

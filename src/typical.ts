@@ -27,6 +27,10 @@ export interface TypicalLot {
   lotId: string
   lotName: string
   total: number
+  // Distinct local calendar dates behind `day` (all history, not per-weekday). Used to gate
+  // anything comparing a live reading against `day` — see status.ts's relativeStatusFor —
+  // the same way `dayOfWeek[].days` gates the "same weekday" overlay.
+  days: number
   day: TypicalCurve
   dayOfWeek: TypicalDayOfWeek[] // present only for weekdays with at least one reading
 }
@@ -58,6 +62,7 @@ export function computeTypical(rows: TypicalRawReading[], timeZone: string): Typ
     {
       lotName: string
       total: number
+      allDays: Set<string>
       day: { sum: number[]; count: number[] }
       dow: Map<number, { sum: number[]; count: number[]; days: Set<string> }>
     }
@@ -66,7 +71,7 @@ export function computeTypical(rows: TypicalRawReading[], timeZone: string): Typ
   for (const r of rows) {
     let lot = byLot.get(r.lot_id)
     if (!lot) {
-      lot = { lotName: r.lot_name, total: r.total, day: emptyCurveAccum(), dow: new Map() }
+      lot = { lotName: r.lot_name, total: r.total, allDays: new Set(), day: emptyCurveAccum(), dow: new Map() }
       byLot.set(r.lot_id, lot)
     }
     lot.total = Math.max(lot.total, r.total)
@@ -74,6 +79,7 @@ export function computeTypical(rows: TypicalRawReading[], timeZone: string): Typ
     // so percent is the only value that's comparable across readings taken months apart.
     const percent = r.total > 0 ? Math.min(100, (r.occupied / r.total) * 100) : 0
     const { dateKey, hour, weekday } = localTimeParts(r.source_updated_ts, timeZone)
+    lot.allDays.add(dateKey)
 
     bump(lot.day.sum, lot.day.count, hour, percent)
 
@@ -91,7 +97,7 @@ export function computeTypical(rows: TypicalRawReading[], timeZone: string): Typ
     const dayOfWeek = [...lot.dow.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([weekday, acc]) => ({ weekday, days: acc.days.size, ...finishCurve(acc) }))
-    result.push({ lotId, lotName: lot.lotName, total: lot.total, day: finishCurve(lot.day), dayOfWeek })
+    result.push({ lotId, lotName: lot.lotName, total: lot.total, days: lot.allDays.size, day: finishCurve(lot.day), dayOfWeek })
   }
   return result.sort((a, b) => a.lotId.localeCompare(b.lotId))
 }

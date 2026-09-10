@@ -59,8 +59,13 @@ function flightArrayFrom(json: unknown): unknown[] {
   const flights = (json as Record<string, unknown>).flights
   if (typeof flights !== 'object' || flights === null) throw new FlightsSourceError('source payload missing "flights"')
   const flight = (flights as Record<string, unknown>).flight
-  if (!Array.isArray(flight)) throw new FlightsSourceError('source payload missing flights.flight array')
-  return flight
+  if (Array.isArray(flight)) return flight
+  // This feed looks XML-derived (an/ac/flt/cc/rem field names), and XML-to-JSON conversions
+  // commonly collapse a single-item list into a bare object instead of a one-element array.
+  // With only one flight left on the board (overnight, most likely), that's exactly what
+  // would happen here, so normalize it rather than failing the whole poll over it.
+  if (typeof flight === 'object' && flight !== null) return [flight]
+  throw new FlightsSourceError('source payload missing flights.flight array')
 }
 
 export function parseFlights(json: unknown, timeZone: string = config.sourceTimeZone): FlightRecord[] {
