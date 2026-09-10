@@ -236,7 +236,7 @@ a { color: inherit; text-decoration-color: var(--muted); }
   padding: 8px 10px; font-size: 12px; min-width: 190px;
 }
 .tooltip .when { color: var(--ink-2); margin-bottom: 6px; }
-.tooltip .row { display: grid; grid-template-columns: 14px 44px 1fr; gap: 6px; align-items: center; padding: 1px 0; }
+.tooltip .row { display: grid; grid-template-columns: 14px auto 1fr; gap: 6px; align-items: center; padding: 1px 0; white-space: nowrap; }
 .tooltip .row .k { height: 2px; background: var(--c); border-radius: 1px; }
 .tooltip .row .v { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
 .tooltip .row .n { color: var(--ink-2); }

@@ -30,6 +30,17 @@ function flightAwareUrl(airlineCode, flightNumber) {
   return icao ? `https://www.flightaware.com/live/flight/${icao}${flightNumber}` : null
 }
 
+// Same terminal-remark set as isFlightStale on the server: a confirmed outcome, not a guess.
+// Once one of these is 30+ minutes past its scheduled time, the flight board drops it rather
+// than let the board grow indefinitely with flights nobody needs to see anymore.
+const FLIGHT_TERMINAL_REMARKS = new Set(['departed', 'landed', 'arrived', 'cancelled', 'canceled'])
+const FLIGHT_BOARD_COMPLETED_AFTER_MS = 30 * 60_000
+function isFlightDoneAndOld(f) {
+  const remark = (f.remark || '').trim().toLowerCase()
+  if (!FLIGHT_TERMINAL_REMARKS.has(remark)) return false
+  return Date.now() - Date.parse(f.scheduledAt) > FLIGHT_BOARD_COMPLETED_AFTER_MS
+}
+
 const STATUS = {
   open: { token: '--status-good', glyph: '✓' },
   busy: { token: '--status-warning', glyph: '◐' },
@@ -96,6 +107,13 @@ function shortName(name) {
 }
 function pct(occupied, total) {
   return total > 0 ? Math.min(100, (occupied / total) * 100) : 0
+}
+// The main chart plots availability, not occupancy: higher on the chart should read as "more
+// parking available," which means the line needs percent-free, not percent-occupied. Every
+// other feature (status labels, tiles, trend badges) keeps using occupied percent as-is — this
+// conversion is scoped to the chart's own local points, applied once at construction.
+function avail(occupiedPct) {
+  return 100 - occupiedPct
 }
 function levelFor(percent) {
   if (percent >= 100) return 'full'
@@ -243,7 +261,7 @@ function renderTiles(latest, trend) {
     valueMain.className = 'value-main'
     valueMain.textContent = lot.free.toLocaleString()
     const small = document.createElement('small')
-    small.textContent = `free of ${lot.total.toLocaleString()}`
+    small.textContent = `open spots of ${lot.total.toLocaleString()}`
     valueMain.append(small)
     valueCol.append(valueMain)
 
@@ -309,16 +327,20 @@ function renderTiles(latest, trend) {
 }
 
 // Small donut: background track + one colored arc for percent occupied, percent centered.
-function ringChart(percent, colorVar) {
+// Ring shows percent AVAILABLE, not occupied — same "spots available, not parked cars" framing
+// as the main chart and the count next to it. The arc's color still comes from the status chip
+// (occupancy-based thresholds), so a mostly-full ring under a red "Limited" chip still reads as
+// concerning even though the ring itself is measuring the opposite quantity.
+function ringChart(occupiedPercent, colorVar) {
   const size = 64
   const stroke = 8
   const r = (size - stroke) / 2
   const c = 2 * Math.PI * r
-  const pctVal = Math.max(0, Math.min(100, percent))
+  const pctVal = Math.max(0, Math.min(100, avail(occupiedPercent)))
   const dash = (pctVal / 100) * c
   const svg = svgEl('svg', {
     viewBox: `0 0 ${size} ${size}`, width: size, height: size, class: 'ring',
-    role: 'img', 'aria-label': `${Math.round(pctVal)}% occupied`,
+    role: 'img', 'aria-label': `${Math.round(pctVal)}% available`,
   })
   svg.append(svgEl('circle', { cx: size / 2, cy: size / 2, r, class: 'ring-track' }))
   svg.append(svgEl('circle', {
@@ -394,7 +416,7 @@ function hourBarsEl(buckets) {
   const wrap = document.createElement('div')
   wrap.className = 'hour-bars'
   wrap.setAttribute('role', 'img')
-  wrap.setAttribute('aria-label', 'Average free spaces by hour, last 24 hours, oldest to most recent')
+  wrap.setAttribute('aria-label', 'Average open spots by hour, last 24 hours, oldest to most recent')
   const known = buckets.map((b) => b.value).filter((v) => v !== null)
   const max = Math.max(1, ...known)
   buckets.forEach(({ ms, value }) => {
@@ -593,15 +615,16 @@ function renderChart(history) {
   const x = (ms) => m.left + ((ms - sinceMs) / spanMs) * plotW
   const y = (p) => m.top + plotH - (Math.min(100, Math.max(0, p)) / 100) * plotH
 
-  // Grid + y axis. Solid hairlines, muted labels. 75% is the site's "Limited" threshold.
+  // Grid + y axis, in percent available (100% at top). The site's "Limited" status is 75%+
+  // occupied, i.e. 25% or less available, so that's where the threshold line lands now.
   for (const v of [0, 25, 50, 75, 100]) {
-    svg.append(svgEl('line', { x1: m.left, x2: m.left + plotW, y1: y(v), y2: y(v), class: v === 0 ? 'baseline' : v === 75 ? 'threshold' : 'gridline' }))
+    svg.append(svgEl('line', { x1: m.left, x2: m.left + plotW, y1: y(v), y2: y(v), class: v === 0 ? 'baseline' : v === 25 ? 'threshold' : 'gridline' }))
     const label = svgEl('text', { x: m.left - 8, y: y(v) + 4, 'text-anchor': 'end', class: 'tick-label' })
     label.textContent = `${v}%`
     svg.append(label)
   }
   // Threshold annotation lives in the axis gutter so it never sits on a line.
-  const note = svgEl('text', { x: m.left - 8, y: y(75) + 15, 'text-anchor': 'end', class: 'note-label' })
+  const note = svgEl('text', { x: m.left - 8, y: y(25) + 15, 'text-anchor': 'end', class: 'note-label' })
   note.textContent = 'Limited'
   svg.append(note)
 
@@ -651,7 +674,7 @@ function renderChart(history) {
   const minDowDays = state.typical?.minDaysForDayOfWeek ?? 3
   const series = lots.map((lot, i) => {
     const color = lotColorVar(lot.lotId, i)
-    const pts = lot.points.map(([ts, occ, tot]) => ({ ms: ts * 1000, p: pct(occ, tot), occ, tot }))
+    const pts = lot.points.map(([ts, occ, tot]) => ({ ms: ts * 1000, p: avail(pct(occ, tot)), occ, tot }))
     const runs = []
     let current = []
     let prevMs = null
@@ -671,7 +694,7 @@ function renderChart(history) {
       const typicalLot = state.typical?.lots.find((l) => l.lotId === lot.lotId)
       if (typicalLot) {
         if (state.showTypicalDay) {
-          const dayD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'day').map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))
+          const dayD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'day').map((pt) => ({ x: x(pt.ms), y: y(avail(pt.p)) })))
           if (dayD) {
             const dayEl = svgEl('path', { d: dayD, class: 'series typical typical-day', stroke: color })
             svg.append(dayEl)
@@ -679,7 +702,7 @@ function renderChart(history) {
           }
         }
         if (state.showTypicalDow) {
-          const dowD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'dow', minDowDays).map((pt) => ({ x: x(pt.ms), y: y(pt.p) })))
+          const dowD = smoothPath(typicalOverlayPoints(typicalLot, sinceMs, untilMs, 'dow', minDowDays).map((pt) => ({ x: x(pt.ms), y: y(avail(pt.p)) })))
           if (dowD) {
             const dowEl = svgEl('path', { d: dowD, class: 'series typical typical-dow', stroke: color })
             svg.append(dowEl)
@@ -799,8 +822,8 @@ function showHover(index) {
     row.className = 'row'
     row.style.setProperty('--c', r.color)
     const k = document.createElement('span'); k.className = 'k'
-    const v = document.createElement('span'); v.className = 'v'; v.textContent = `${Math.round(r.p)}%`
-    const n = document.createElement('span'); n.className = 'n'; n.textContent = `${r.name} · ${r.free.toLocaleString()} free`
+    const v = document.createElement('span'); v.className = 'v'; v.textContent = `${r.free.toLocaleString()} open spots`
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = r.name
     row.append(k, v, n)
     tip.append(row)
   }
@@ -810,7 +833,7 @@ function showHover(index) {
   // scrubbing needs this text equivalent. aria-live announces it; screen readers skip re-announcing
   // when the text is unchanged, so rapid pointermove over the same bucket doesn't spam it.
   els.chartStatus.textContent = rows.length
-    ? `${fmt.dateTime.format(new Date(ms))}: ${rows.map((r) => `${r.name} ${Math.round(r.p)}% (${r.free.toLocaleString()} free)`).join(', ')}`
+    ? `${fmt.dateTime.format(new Date(ms))}: ${rows.map((r) => `${r.name} ${r.free.toLocaleString()} open spots`).join(', ')}`
     : `${fmt.dateTime.format(new Date(ms))}: no reading`
 
   const wrapW = els.chartWrap.clientWidth
@@ -848,8 +871,12 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
   // Stale flights (see isFlightStale server-side) fell off the live board without ever
   // reaching a confirmed outcome. Rather than show a per-row "unconfirmed" warning — which
   // reads as broken even though it's accurate — this board just drops them silently, the same
-  // way the live source itself drops completed arrivals with no explicit status.
-  const sorted = rows.filter((f) => !f.stale).sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
+  // way the live source itself drops completed arrivals with no explicit status. Flights that
+  // *did* reach a confirmed outcome (arrived, departed, cancelled) drop off too, once they're
+  // far enough past due that they're no longer "what's happening now."
+  const sorted = rows
+    .filter((f) => !f.stale && !isFlightDoneAndOld(f))
+    .sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
   headingEl.replaceChildren(flightIconSvg(kind), document.createTextNode(` ${label} (${sorted.length})`))
   table.replaceChildren()
 
