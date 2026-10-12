@@ -12,7 +12,8 @@ Restart=on-failure
 RestartSec=10
 Environment=NODE_ENV=production
 Environment=PORT=3210
-Environment=HOST=0.0.0.0
+# Loopback only: the Cloudflare Tunnel reaches it on localhost, nothing else on the LAN needs to.
+Environment=HOST=127.0.0.1
 Environment=DB_PATH=/opt/sba-parking/data/parking.db
 Environment=USER_AGENT=sba-parking-tracker/0.1 (+mailto:you@example.com)
 Environment=POLL_FLIGHTS=1
