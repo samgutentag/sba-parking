@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import http from 'node:http'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { config } from './config.ts'
@@ -293,9 +294,38 @@ async function flightsPayload(db: ParkingStore, url: URL) {
   }
 }
 
+// Cloudflare overrides our no-cache on .js/.css with a 4h browser TTL, so after a deploy
+// visitors could run old JS/CSS against the new API. Stamping the asset URLs in index.html
+// with a hash of their contents makes every deploy a new URL, which no cache has seen. The
+// page itself isn't cached, so it always carries the current stamp. Built once per process:
+// a deploy is always a restart.
+const VERSIONED_ASSETS = ['/app.js', '/style.css']
+let indexHtml: Promise<string> | null = null
+
+async function buildIndexHtml(root: string): Promise<string> {
+  let html = await readFile(join(root, 'index.html'), 'utf8')
+  for (const asset of VERSIONED_ASSETS) {
+    const hash = createHash('sha256').update(await readFile(join(root, asset))).digest('hex').slice(0, 10)
+    html = html.replaceAll(`"${asset}"`, `"${asset}?v=${hash}"`)
+  }
+  return html
+}
+
 async function serveStatic(pathname: string, res: http.ServerResponse): Promise<void> {
   const root = resolve(config.publicDir)
-  const rel = normalize(decodeURIComponent(pathname === '/' ? '/index.html' : pathname))
+  if (pathname === '/' || pathname === '/index.html') {
+    // Reset on failure so one bad read (say, mid-deploy) doesn't wedge the page until restart.
+    indexHtml ??= buildIndexHtml(root).catch((err) => { indexHtml = null; throw err })
+    const html = await indexHtml
+    res.writeHead(200, {
+      'content-type': MIME['.html'],
+      'content-length': Buffer.byteLength(html),
+      'cache-control': 'no-cache',
+    })
+    res.end(html)
+    return
+  }
+  const rel = normalize(decodeURIComponent(pathname))
   const file = join(root, rel)
   if (!file.startsWith(root + sep)) {
     res.writeHead(403).end('forbidden')
