@@ -41,6 +41,24 @@ function isFlightDoneAndOld(f) {
   return Date.now() - Date.parse(f.scheduledAt) > FLIGHT_BOARD_COMPLETED_AFTER_MS
 }
 
+// Who a gap in the readings is on, as the server works it out from its own poll log.
+const GAP_LABEL = {
+  paused: 'Airport feed paused',
+  unreachable: 'Airport site unreachable',
+  offline: 'Tracker offline',
+}
+const GAP_SHORT_LABEL = { paused: 'Paused', unreachable: 'Unreachable', offline: 'Offline' }
+
+function gapSpanText(gap) {
+  const from = new Date(gap.fromAt)
+  const to = new Date(gap.toAt)
+  const hours = (to - from) / 3_600_000
+  const len = hours < 48 ? `${hours < 10 ? hours.toFixed(1) : Math.round(hours)} h` : `${Math.round(hours / 24)} d`
+  const sameDay = fmt.date.format(from) === fmt.date.format(to)
+  const f = (d) => (sameDay ? fmt.time : fmt.dateTime).format(d)
+  return gap.ongoing ? `since ${f(from)} (${len})` : `${f(from)} – ${f(to)} (${len})`
+}
+
 const STATUS = {
   open: { token: '--status-good', glyph: '✓' },
   busy: { token: '--status-warning', glyph: '◐' },
@@ -222,10 +240,14 @@ function renderTiles(latest, trend) {
     const level = lot.level ?? levelFor(lot.percent)
     const status = STATUS[level]
     const tile = document.createElement('article')
-    tile.className = 'tile'
+    // A stale reading still shows its numbers (they're the last real ones), but the status
+    // chip stops claiming "Open"/"Limited" about right now and the trend is dropped, since
+    // neither means anything once the feed has stopped moving.
+    const stale = lot.stale === true
+    tile.className = stale ? 'tile tile-stale' : 'tile'
     tile.dataset.lotId = lot.lotId
     tile.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
-    tile.style.setProperty('--chip-color', `var(${status.token})`)
+    tile.style.setProperty('--chip-color', stale ? 'var(--muted)' : `var(${status.token})`)
     tile.addEventListener('pointerenter', () => setLotHover(lot.lotId))
     tile.addEventListener('pointerleave', () => setLotHover(null))
 
@@ -233,15 +255,18 @@ function renderTiles(latest, trend) {
     label.className = 'label'
     const name = document.createElement('span')
     name.textContent = lot.lotName
-    const chip = document.createElement('span')
-    chip.className = 'chip'
-    chip.title = statusChipTitle(lot)
-    const glyph = document.createElement('span')
-    glyph.className = 'glyph'
-    glyph.setAttribute('aria-hidden', 'true')
-    glyph.textContent = status.glyph
-    chip.append(glyph, document.createTextNode(lot.status))
-    label.append(name, chip)
+    label.append(name)
+    if (!stale) {
+      const chip = document.createElement('span')
+      chip.className = 'chip'
+      chip.title = statusChipTitle(lot)
+      const glyph = document.createElement('span')
+      glyph.className = 'glyph'
+      glyph.setAttribute('aria-hidden', 'true')
+      glyph.textContent = status.glyph
+      chip.append(glyph, document.createTextNode(lot.status))
+      label.append(chip)
+    }
 
     const trendLotHist = trend?.lots.find((l) => l.lotId === lot.lotId)
     const t = trendLotHist
@@ -268,7 +293,7 @@ function renderTiles(latest, trend) {
 
     mid.append(ringCol, valueCol)
 
-    if (t) {
+    if (t && !stale) {
       const info = TREND[t.key]
       const badge = document.createElement('span')
       badge.className = `trend trend-${t.key}`
@@ -306,10 +331,14 @@ function renderTiles(latest, trend) {
     const left = document.createElement('span')
     left.textContent = `${Math.round(avail(lot.percent))}% available · ${lot.free.toLocaleString()} open`
     const right = document.createElement('span')
-    right.textContent = `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
+    right.textContent = stale
+      ? `last update ${relative(lot.sourceUpdatedAt)}`
+      : `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
     detail.append(left, right)
 
-    tile.append(label, mid, meter, bars, detail)
+    tile.append(label)
+    if (stale) tile.append(staleNoteEl(latest.feed?.cause, lot.sourceUpdatedAt))
+    tile.append(mid, meter, bars, detail)
 
     const info = LOT_INFO[lot.lotId]
     if (info) {
@@ -332,6 +361,33 @@ function renderTiles(latest, trend) {
 // as the main chart and the count next to it. The arc's color still comes from the status chip
 // (occupancy-based thresholds), so a mostly-full ring under a red "Limited" chip still reads as
 // concerning even though the ring itself is measuring the opposite quantity.
+// Says whose side the missing data is on, so "the airport stopped publishing" never reads
+// the same as "this site stopped collecting." Same causes as the chart's outage bands.
+const STALE_NOTE = {
+  paused: { glyph: '⏸', title: "Airport isn't publishing updates", body: (t) => `No new counts from the airport since ${t}. These are its last numbers.` },
+  unreachable: { glyph: '⚠', title: "Airport's site isn't responding", body: (t) => `Couldn't reach the airport's feed since ${t}. These are the last numbers it gave.` },
+  offline: { glyph: '⚠', title: 'This tracker is offline', body: (t) => `This site stopped collecting at ${t}. These are the last numbers it saved.` },
+}
+
+function staleNoteEl(cause, sinceIso) {
+  const note = STALE_NOTE[cause] ?? STALE_NOTE.paused
+  const el = document.createElement('div')
+  el.className = `stale-note stale-${cause ?? 'paused'}`
+  el.setAttribute('role', 'status')
+  const glyph = document.createElement('span')
+  glyph.className = 'glyph'
+  glyph.setAttribute('aria-hidden', 'true')
+  glyph.textContent = note.glyph
+  const text = document.createElement('div')
+  const strong = document.createElement('strong')
+  strong.textContent = note.title
+  const body = document.createElement('span')
+  body.textContent = note.body(fmt.time.format(new Date(sinceIso)))
+  text.append(strong, body)
+  el.append(glyph, text)
+  return el
+}
+
 function ringChart(occupiedPercent, colorVar) {
   const size = 64
   const stroke = 8
@@ -452,7 +508,10 @@ function renderSourceLine(latest) {
     else if (ageMs > p.intervalMs * 3) dot.classList.add('stale')
     text = `Last poll ${relative(p.lastPollAt)}`
     if (p.lastPollOk === false && p.lastError) text += ` failed (${p.lastError})`
-    else if (latest.lots[0]) text += ` · feed updated ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
+    else if (latest.feed?.stale && latest.lots[0]) {
+      dot.classList.add('stale')
+      text += ` · ${latest.feed.cause === 'paused' ? 'airport feed paused' : 'no new data'} since ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
+    } else if (latest.lots[0]) text += ` · feed updated ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
   }
   // Rendered twice: once for the header (desktop) and once below the tiles (mobile) — see
   // .source-line-mobile in style.css. Two elements rather than one repositioned via CSS,
@@ -638,6 +697,41 @@ function renderChart(history) {
     svg.append(label)
   }
 
+  // Break the path only on a real outage, not on normal quiet stretches. Readings are stored
+  // on change only (see README), so two genuine, healthy samples for a lot can legitimately
+  // sit 15-20+ minutes apart even though the poller never missed a beat. Gauging the gap off
+  // the chart's display bucket (as small as 60s) broke almost every segment into its own
+  // dash. Gauge it off the poller's real cadence instead, with enough slack to absorb a few
+  // backed-off retries. On 30d/all the display bucket (1h+) is itself wider than that, so
+  // adjacent buckets must never count as a gap; only a missing bucket does.
+  const pollIntervalMs = state.latest?.poller?.intervalMs ?? 5 * 60_000
+  const bucketMs = (history.bucketSeconds || 60) * 1000
+  const gapMs = Math.max(30 * 60_000, pollIntervalMs * 6, bucketMs * 2)
+
+  // Outage bands: shade every stretch the server reports with no new readings, so a gap
+  // reads as "the feed stopped" instead of empty chart. Same gapMs as the path breaks, so a
+  // band never sits under a line that runs straight through it. Nothing is interpolated.
+  for (const gap of history.gaps ?? []) {
+    const fromMs = Math.max(sinceMs, Date.parse(gap.fromAt))
+    const toMs = Math.min(untilMs, Date.parse(gap.toAt))
+    if (toMs - fromMs <= 0 || Date.parse(gap.toAt) - Date.parse(gap.fromAt) <= gapMs) continue
+    const bx = x(fromMs)
+    const bw = Math.max(2, x(toMs) - bx)
+    const band = svgEl('rect', { x: bx, y: m.top, width: bw, height: plotH, class: `gap-band gap-${gap.cause}` })
+    svg.append(band)
+    // Labels only where they fit inside the band; a narrow band falls back to the short form.
+    if (bw >= 60) {
+      const text = svgEl('text', { x: bx + bw / 2, y: m.top + 14, 'text-anchor': 'middle', class: 'gap-label' })
+      text.textContent = (bw >= 130 ? GAP_LABEL[gap.cause] : GAP_SHORT_LABEL[gap.cause]) ?? 'No data'
+      svg.append(text)
+      if (bw >= 160) {
+        const sub = svgEl('text', { x: bx + bw / 2, y: m.top + 28, 'text-anchor': 'middle', class: 'gap-sub' })
+        sub.textContent = gapSpanText(gap)
+        svg.append(sub)
+      }
+    }
+  }
+
   // Flight markers: one vertical line per scheduled flight, drawn before the lot series so
   // real occupancy lines always paint on top. Disabled for now (FLIGHTS_CHART_MARKERS_ENABLED)
   // — too cluttered even scoped to short ranges — but left wired up to re-enable later.
@@ -663,17 +757,7 @@ function renderChart(history) {
     if (state.showDepartures) legendEntry('Departures', 'var(--flight-departure)', true)
   }
 
-  // Series. Break the path only on a real polling outage, not on normal quiet stretches.
-  // Readings are stored on change only (see README), so two genuine, healthy samples for
-  // a lot can legitimately sit 15-20+ minutes apart even though the poller never missed a
-  // beat. Gauging the gap off the chart's display bucket (as small as 60s) broke almost
-  // every segment into its own dash. Gauge it off the poller's real cadence instead, with
-  // enough slack to absorb a few backed-off retries. On 30d/all the display bucket (1h+)
-  // is itself wider than that, so adjacent buckets must never count as a gap; only a
-  // missing bucket does.
-  const pollIntervalMs = state.latest?.poller?.intervalMs ?? 5 * 60_000
-  const bucketMs = (history.bucketSeconds || 60) * 1000
-  const gapMs = Math.max(30 * 60_000, pollIntervalMs * 6, bucketMs * 2)
+  // Series (path breaks use gapMs, defined with the outage bands above).
   const typicalOn = (state.showTypicalDay || state.showTypicalDow) && TYPICAL_SUPPORTED_RANGES.has(state.range)
   const minDowDays = state.typical?.minDaysForDayOfWeek ?? 3
   const series = lots.map((lot, i) => {

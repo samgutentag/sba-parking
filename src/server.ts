@@ -57,6 +57,40 @@ async function getTypicalLots(db: ParkingStore): Promise<{ sinceAt: string; unti
   return typicalCache
 }
 
+// The airport says it refreshes roughly every 3 minutes, so 30 minutes without its timestamp
+// moving is well past normal jitter. Past this a reading is "stale" on the tiles and a gap in
+// history is reported as an outage rather than a quiet stretch.
+const FEED_STALE_SECONDS = 30 * 60
+
+type GapCause = 'paused' | 'unreachable' | 'offline'
+
+// Whose side a gap was on, read off our own poll log for that stretch: we kept polling fine
+// and the timestamp just didn't move (the airport paused), our requests failed (the airport
+// site was down or refusing us), or we barely polled at all (this tracker was offline).
+async function gapCause(db: ParkingStore, fromTs: number, toTs: number): Promise<GapCause> {
+  const { ok, failed } = await db.pollCounts(isoFromEpochSeconds(fromTs), isoFromEpochSeconds(toTs))
+  const expected = Math.max(1, (toTs - fromTs) / (config.pollIntervalMs / 1000))
+  if (ok >= expected * 0.5) return 'paused'
+  if (failed > ok) return 'unreachable'
+  return 'offline'
+}
+
+async function gapsPayload(db: ParkingStore, sinceTs: number, latestTs: number | null) {
+  const now = Math.floor(Date.now() / 1000)
+  const rows = await db.readingGaps(sinceTs, FEED_STALE_SECONDS)
+  const spans = rows.map((r) => ({ fromTs: r.from_ts, toTs: r.to_ts, ongoing: false }))
+  // A gap that hasn't ended yet: nothing new since the latest reading. Its right edge is now.
+  if (latestTs !== null && now - latestTs > FEED_STALE_SECONDS) spans.push({ fromTs: latestTs, toTs: now, ongoing: true })
+  return Promise.all(
+    spans.map(async (g) => ({
+      fromAt: isoFromEpochSeconds(g.fromTs),
+      toAt: isoFromEpochSeconds(g.toTs),
+      ongoing: g.ongoing,
+      cause: await gapCause(db, g.fromTs, g.toTs),
+    })),
+  )
+}
+
 class BadRequest extends Error {}
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -71,6 +105,8 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 
 async function latestPayload(db: ParkingStore) {
   const [rows, last, stats, typical] = await Promise.all([db.latest(), db.lastPoll(), db.stats(), getTypicalLots(db)])
+  const nowTs = Math.floor(Date.now() / 1000)
+  const feedStale = stats.latest_ts !== null && nowTs - stats.latest_ts > FEED_STALE_SECONDS
   return {
     generatedAt: new Date().toISOString(),
     timeZone: config.sourceTimeZone,
@@ -100,8 +136,15 @@ async function latestPayload(db: ParkingStore) {
         sourceUpdated: r.source_updated,
         sourceUpdatedAt: isoFromEpochSeconds(r.source_updated_ts),
         lastSeenAt: r.last_seen_utc,
+        stale: nowTs - r.source_updated_ts > FEED_STALE_SECONDS,
       }
     }),
+    feed: {
+      staleAfterMs: FEED_STALE_SECONDS * 1000,
+      stale: feedStale,
+      // Only worth a second query when there's something to explain.
+      cause: feedStale && stats.latest_ts !== null ? await gapCause(db, stats.latest_ts, nowTs) : null,
+    },
     poller: {
       enabled: config.pollEnabled,
       intervalMs: config.pollIntervalMs,
@@ -143,7 +186,8 @@ async function historyPayload(db: ParkingStore, url: URL) {
     sinceTs = stats.earliest_ts ?? 0
   }
 
-  const rows = await db.history(sinceTs, bucket)
+  const [rows, stats] = await Promise.all([db.history(sinceTs, bucket), db.stats()])
+  const gaps = await gapsPayload(db, sinceTs, stats.latest_ts)
   const lots = new Map<string, { lotId: string; lotName: string; total: number; points: Array<[number, number, number]> }>()
   for (const r of rows) {
     let lot = lots.get(r.lot_id)
@@ -162,6 +206,9 @@ async function historyPayload(db: ParkingStore, url: URL) {
     timeZone: config.sourceTimeZone,
     // points: [epochSeconds, occupied, total]
     lots: [...lots.values()].sort((a, b) => a.lotId.localeCompare(b.lotId)),
+    // Outages longer than FEED_STALE_SECONDS, bounded by the readings on either side (the
+    // first may start before sinceAt). cause: paused | unreachable | offline, see gapCause.
+    gaps,
   }
 }
 

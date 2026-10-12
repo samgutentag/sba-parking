@@ -11,9 +11,11 @@ import {
   SQL,
   type FlightRow,
   type FlightStoreStats,
+  type GapRow,
   type HistoryRow,
   type LatestRow,
   type ParkingStore,
+  type PollCounts,
   type PollRecord,
   type PollRow,
   type StoreStats,
@@ -29,6 +31,8 @@ export class SqliteStore implements ParkingStore {
   #typicalRaw
   #lastPoll
   #stats
+  #readingGaps
+  #pollCounts
   #upsertFlight
   #insertFlightPoll
   #flightsInRange
@@ -48,6 +52,8 @@ export class SqliteStore implements ParkingStore {
     this.#typicalRaw = this.#db.prepare(SQL.typicalRaw)
     this.#lastPoll = this.#db.prepare(SQL.lastPoll)
     this.#stats = this.#db.prepare(SQL.stats)
+    this.#readingGaps = this.#db.prepare(SQL.readingGaps)
+    this.#pollCounts = this.#db.prepare(SQL.pollCounts)
     this.#upsertFlight = this.#db.prepare(SQL.upsertFlight)
     this.#insertFlightPoll = this.#db.prepare(SQL.insertFlightPoll)
     this.#flightsInRange = this.#db.prepare(SQL.flightsInRange)
@@ -96,6 +102,14 @@ export class SqliteStore implements ParkingStore {
   async stats(): Promise<StoreStats> {
     const dayAgo = new Date(Date.now() - 24 * 3600_000).toISOString()
     return this.#stats.get(dayAgo) as unknown as StoreStats
+  }
+
+  async readingGaps(sinceTs: number, minGapSeconds: number): Promise<GapRow[]> {
+    return this.#readingGaps.all(sinceTs, minGapSeconds) as unknown as GapRow[]
+  }
+
+  async pollCounts(fromIso: string, toIso: string): Promise<PollCounts> {
+    return this.#pollCounts.get(fromIso, toIso) as unknown as PollCounts
   }
 
   async recordFlights(flights: FlightRecord[], nowIso: string): Promise<{ inserted: number; seen: number }> {

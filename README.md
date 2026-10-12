@@ -86,8 +86,8 @@ Flights are stored the same way, one row per distinct scheduled leg in a separat
 
 | route | returns |
 |---|---|
-| `GET /api/latest` | newest reading per lot with free count, percent, status label (`statusBasis`/`typicalPercent`/`deviationPp` when typical-relative), plus poller health and history stats |
-| `GET /api/history?range=6h\|today\|7d\|30d\|all` | per-lot points `[epochSeconds, occupied, total]`, bucketed by average (1 min, 1 min, 15 min, 1 h, adaptive). `today` is a fixed local calendar day (midnight to midnight), not a rolling window — the axis has room for hours that haven't happened yet |
+| `GET /api/latest` | newest reading per lot with free count, percent, status label (`statusBasis`/`typicalPercent`/`deviationPp` when typical-relative) and `stale` (no new airport timestamp in 30 min), plus `feed` (`stale`, `cause`), poller health and history stats |
+| `GET /api/history?range=6h\|today\|7d\|30d\|all` | per-lot points `[epochSeconds, occupied, total]`, bucketed by average (1 min, 1 min, 15 min, 1 h, adaptive). `today` is a fixed local calendar day (midnight to midnight), not a rolling window — the axis has room for hours that haven't happened yet. Also returns `gaps`: stretches over 30 min where the airport's timestamp didn't advance, each with `cause` = `paused` (we polled fine, the airport didn't publish), `unreachable` (our requests failed), or `offline` (this tracker wasn't polling), read off the `polls` log. The chart shades them; nothing is interpolated |
 | `GET /api/typical` | per-lot hour-of-day and hour-of-day-by-weekday baseline curves, for the chart's dashed reference lines |
 | `GET /api/flights?since=&until=` | flights in a window (epoch seconds; defaults to today's local calendar day), plus poller health and storage stats. Each flight carries `stale` (see below) and `lastSeenAt`. Backs the on-page flight board, not just diagnostics |
 | `GET /api/health` | 200 when the last poll is recent, 503 when polling is enabled but stale |

@@ -48,6 +48,16 @@ export interface StoreStats {
   failed_polls_24h: number
 }
 
+export interface GapRow {
+  from_ts: number
+  to_ts: number
+}
+
+export interface PollCounts {
+  ok: number
+  failed: number
+}
+
 export interface PollRecord {
   ok: boolean
   httpStatus?: number
@@ -93,6 +103,10 @@ export interface ParkingStore {
   typicalRaw(sinceTs: number): Promise<TypicalRawRow[]>
   lastPoll(): Promise<PollRow | undefined>
   stats(): Promise<StoreStats>
+  /** Stretches longer than `minGapSeconds` where the airport's own timestamp didn't advance. */
+  readingGaps(sinceTs: number, minGapSeconds: number): Promise<GapRow[]>
+  /** Our own poll outcomes strictly between two ISO timestamps, to say whose side a gap was on. */
+  pollCounts(fromIso: string, toIso: string): Promise<PollCounts>
 
   /** Upsert one poll's flight board. An unchanged flight only bumps last_seen_utc. */
   recordFlights(flights: FlightRecord[], nowIso: string): Promise<{ inserted: number; seen: number }>
@@ -208,6 +222,25 @@ export const SQL = {
     ORDER BY source_updated_ts`,
 
   lastPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT 1',
+
+  // ?1 since epoch seconds, ?2 minimum gap seconds. Every lot shares the feed's one timestamp,
+  // so gaps are found across distinct timestamps, not per lot. Starts from the last reading
+  // *before* the window so a gap straddling its left edge still shows up.
+  readingGaps: `
+    WITH ts AS (
+      SELECT DISTINCT source_updated_ts AS ts FROM readings
+      WHERE source_updated_ts >= COALESCE((SELECT MAX(source_updated_ts) FROM readings WHERE source_updated_ts < ?1), ?1)
+    ), pairs AS (
+      SELECT LAG(ts) OVER (ORDER BY ts) AS from_ts, ts AS to_ts FROM ts
+    )
+    SELECT from_ts, to_ts FROM pairs
+    WHERE from_ts IS NOT NULL AND to_ts - from_ts > ?2
+    ORDER BY from_ts`,
+
+  // ?1, ?2 ISO timestamps (exclusive). ISO strings from toISOString() sort chronologically.
+  pollCounts: `
+    SELECT COALESCE(SUM(ok = 1), 0) AS ok, COALESCE(SUM(ok = 0), 0) AS failed
+    FROM polls WHERE ts_utc > ?1 AND ts_utc < ?2`,
 
   // ?1 ISO timestamp 24 hours ago.
   stats: `
