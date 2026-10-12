@@ -668,9 +668,12 @@ function renderChart(history) {
   // a lot can legitimately sit 15-20+ minutes apart even though the poller never missed a
   // beat. Gauging the gap off the chart's display bucket (as small as 60s) broke almost
   // every segment into its own dash. Gauge it off the poller's real cadence instead, with
-  // enough slack to absorb a few backed-off retries.
+  // enough slack to absorb a few backed-off retries. On 30d/all the display bucket (1h+)
+  // is itself wider than that, so adjacent buckets must never count as a gap; only a
+  // missing bucket does.
   const pollIntervalMs = state.latest?.poller?.intervalMs ?? 5 * 60_000
-  const gapMs = Math.max(30 * 60_000, pollIntervalMs * 6)
+  const bucketMs = (history.bucketSeconds || 60) * 1000
+  const gapMs = Math.max(30 * 60_000, pollIntervalMs * 6, bucketMs * 2)
   const typicalOn = (state.showTypicalDay || state.showTypicalDow) && TYPICAL_SUPPORTED_RANGES.has(state.range)
   const minDowDays = state.typical?.minDaysForDayOfWeek ?? 3
   const series = lots.map((lot, i) => {
