@@ -216,6 +216,20 @@ function relative(iso) {
   return `${Math.round(h / 24)} d ago`
 }
 
+// A fresh reading reads best as an age ("updated 4 min ago"). Past the same 30-minute line where
+// a reading counts as stale, an age hides when it actually was ("9 h ago" on a morning visit
+// doesn't say "last night"), so switch to the clock time, with the day once it isn't today.
+const AS_OF_RELATIVE_MS = 30 * 60_000
+const dayKeyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: state.timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
+function asOf(iso) {
+  const ms = Date.parse(iso)
+  const ageMs = Date.now() - ms
+  if (ageMs < AS_OF_RELATIVE_MS) return `updated ${relative(iso)}`
+  const d = new Date(ms)
+  if (dayKeyFmt.format(d) === dayKeyFmt.format(new Date())) return `as of ${fmt.time.format(d)}`
+  return `as of ${(ageMs < 6 * 86400_000 ? fmt.dayTime : fmt.dateTime).format(d)}`
+}
+
 async function getJson(url) {
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`)
@@ -331,9 +345,7 @@ function renderTiles(latest, trend) {
     const left = document.createElement('span')
     left.textContent = `${Math.round(avail(lot.percent))}% available · ${lot.free.toLocaleString()} open`
     const right = document.createElement('span')
-    right.textContent = stale
-      ? `last update ${relative(lot.sourceUpdatedAt)}`
-      : `as of ${fmt.time.format(new Date(lot.sourceUpdatedAt))}`
+    right.textContent = asOf(lot.sourceUpdatedAt)
     detail.append(left, right)
 
     tile.append(label)
@@ -511,7 +523,7 @@ function renderSourceLine(latest) {
     else if (latest.feed?.stale && latest.lots[0]) {
       dot.classList.add('stale')
       text += ` · ${latest.feed.cause === 'paused' ? 'airport feed paused' : 'no new data'} since ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
-    } else if (latest.lots[0]) text += ` · feed updated ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
+    } else if (latest.lots[0]) text += ` · feed ${asOf(latest.lots[0].sourceUpdatedAt)}`
   }
   // Rendered twice: once for the header (desktop) and once below the tiles (mobile) — see
   // .source-line-mobile in style.css. Two elements rather than one repositioned via CSS,
