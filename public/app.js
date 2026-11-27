@@ -1052,8 +1052,8 @@ async function loadLatest() {
     // This 24h/1-min-bucket fetch is independent of the chart's range selector, so the tile
     // trend badges and 24h bar chart don't shift when you switch the chart to 7d/30d/all.
     const [latest, mini] = await Promise.all([
-      getJson('/api/latest'),
-      getJson(`/api/history?range=${MINI_HISTORY_RANGE}`),
+      getJson('api/latest'),
+      getJson(`api/history?range=${MINI_HISTORY_RANGE}`),
     ])
     state.latest = latest
     renderTiles(latest, mini)
@@ -1074,7 +1074,7 @@ async function loadHistory() {
   const seq = ++historyRequestSeq
   els.chartWrap.classList.add('loading')
   try {
-    const history = await getJson(`/api/history?range=${encodeURIComponent(state.range)}`)
+    const history = await getJson(`api/history?range=${encodeURIComponent(state.range)}`)
     if (seq !== historyRequestSeq) return // a newer request has since started; drop this one
     state.history = history
     // The flight board (and, if re-enabled, the chart's flight-line overlay) both track
@@ -1082,7 +1082,7 @@ async function loadHistory() {
     const sinceTs = Math.floor(Date.parse(state.history.sinceAt) / 1000)
     const untilTs = Math.floor(Date.parse(state.history.untilAt) / 1000)
     try {
-      const flights = await getJson(`/api/flights?since=${sinceTs}&until=${untilTs}`)
+      const flights = await getJson(`api/flights?since=${sinceTs}&until=${untilTs}`)
       if (seq !== historyRequestSeq) return
       state.flights = flights
       renderFlightsBoard(state.flights)
@@ -1104,7 +1104,7 @@ async function loadHistory() {
 
 async function loadTypical() {
   try {
-    state.typical = await getJson('/api/typical')
+    state.typical = await getJson('api/typical')
   } catch {
     // Baselines are a nice-to-have; a failed fetch shouldn't take down the main chart.
     state.typical = null

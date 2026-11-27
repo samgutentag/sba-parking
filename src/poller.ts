@@ -32,7 +32,7 @@ export interface Poller {
 // Polls on a fixed interval; on failure backs off exponentially up to maxBackoffMs.
 // Never retries harder than the base interval. This is a .gov upstream on an undocumented route.
 export function startPoller(db: ParkingStore, log: (line: string) => void = console.log): Poller {
-  let timer: NodeJS.Timeout | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
   let backoffMs = 0
   let stopped = false
 

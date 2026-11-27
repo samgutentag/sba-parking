@@ -1,5 +1,4 @@
-import { fileURLToPath } from 'node:url'
-
+// On Workers, process.env comes from wrangler.toml [vars] and secrets (nodejs_compat).
 const env = process.env
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -10,8 +9,6 @@ function positiveInt(value: string | undefined, fallback: number): number {
 export const config = {
   port: positiveInt(env.PORT, 3210),
   host: env.HOST ?? '127.0.0.1',
-  dbPath: env.DB_PATH ?? fileURLToPath(new URL('../data/parking.db', import.meta.url)),
-  publicDir: fileURLToPath(new URL('../public/', import.meta.url)),
   pollEnabled: env.POLL !== '0',
   pollIntervalMs: positiveInt(env.POLL_INTERVAL_MS, 5 * 60_000),
   maxBackoffMs: positiveInt(env.MAX_BACKOFF_MS, 60 * 60_000),

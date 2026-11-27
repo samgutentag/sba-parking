@@ -38,7 +38,7 @@ export interface FlightsPoller {
 // policy as the parking poller. The flight board changes far less often than occupancy, so
 // the default interval is longer (see config.flightsPollIntervalMs).
 export function startFlightsPoller(db: ParkingStore, log: (line: string) => void = console.log): FlightsPoller {
-  let timer: NodeJS.Timeout | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
   let backoffMs = 0
   let stopped = false
 
