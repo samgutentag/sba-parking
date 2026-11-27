@@ -215,6 +215,11 @@ export default {
       return await serveStatic(env, path, request, url)
     } catch (err) {
       console.error(err)
+      // D1's free-tier daily limits reset at midnight UTC. Say so, rather than a bare 500.
+      const message = err instanceof Error ? err.message : String(err)
+      if (/D1_ERROR/.test(message) && /daily row (read|write) limit/.test(message)) {
+        return json(503, { error: 'database daily limit reached; data returns after midnight UTC' })
+      }
       return json(500, { error: 'internal error' })
     }
   },

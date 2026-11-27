@@ -233,7 +233,11 @@ function asOf(iso) {
 
 async function getJson(url) {
   const res = await fetch(url, { cache: 'no-store' })
-  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`)
+  if (!res.ok) {
+    // Prefer the server's own explanation when it sends one.
+    const detail = await res.json().then((b) => b?.error, () => null)
+    throw new Error(detail || `${url} -> HTTP ${res.status}`)
+  }
   return res.json()
 }
 
