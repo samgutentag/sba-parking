@@ -21,9 +21,9 @@ binding = "DB"
 database_name = "sba-parking"
 database_id = "14bb8114-b4aa-4434-9fdf-abbd707b0261"
 
-# Parking every 5 minutes, flights every 15. Must match PARKING_CRON / FLIGHTS_CRON in worker.ts.
+# Both pollers every 5 minutes, from one trigger. Must match POLL_CRON in worker.ts.
 [triggers]
-crons = ["*/5 * * * *", "*/15 * * * *"]
+crons = ["*/5 * * * *"]
 
 [vars]
 BASE_PATH = "/sba-parking"

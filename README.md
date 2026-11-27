@@ -59,9 +59,9 @@ Also no auth, no key. The airport's own arrivals-departures page embeds a "Real-
 
 This is a **live board, not a schedule archive**: it only ever returns today's (and sometimes tonight's overnight) flights, arrivals and departures mixed (`type` is `A` or `D`). There's no seat count or aircraft type, so a flight count is a proxy for passenger volume, not the real number. The point of tracking this at all is to eventually check whether departure volume in a given window correlates with the parking lots filling up faster, e.g. "5 departures around 9am" — but that's a hypothesis, not a claim this repo makes yet, and won't be worth testing until weeks of paired flight and occupancy data exist. `src/flights-source.ts` parses leniently (skips a malformed row rather than failing the whole poll), unlike the stricter parking parser, since this is a status board that can plausibly emit odd rows.
 
-The board never marks an arrival complete: a departure gets a `DEPARTED` remark, but a finished arrival just silently disappears from the feed instead of getting a `LANDED`-style status. `isFlightStale` (`src/server.ts`) catches this: a flight past its scheduled time that hasn't been reconfirmed in a couple of poll cycles, and whose last remark isn't already a real terminal outcome (`departed`/`landed`/`arrived`/`cancelled`), is flagged `stale` rather than trusted. The flight board (below) uses that flag, plus its own 30-minutes-past-due rule for flights that *did* reach a confirmed outcome, to decide what's still worth showing.
+The board rarely posts a final status before dropping a flight. Measured over the first 4,595 stored flights (Sep to Nov 2026), only about 15% were last seen as `DEPARTED` or `ARRIVED`; most vanished about 20 to 25 minutes after their time while still saying `ON TIME` or `Now …`. About 4 in 10 flights carry a revised time in the remark itself (`Now   9:17A`), ranging from 18 minutes early to 76 minutes late (10th to 90th percentile). `src/flight-status.ts` reads that into an `expectedAt` time and a normalized `status` (`On time`, `Delayed`, `Early` at 5+ minutes off schedule, `Boarding`, `Departed`, `Arrived`, `Canceled`, or the remark as published if it's something new). `isFlightStale` (`src/api.ts`) flags a flight that's past its *expected* time and hasn't been reconfirmed in a couple of poll cycles, unless it already reached a confirmed outcome. The flight board (below) uses that flag, plus its own 30-minutes-past-expected rule for confirmed outcomes, to decide what's still worth showing.
 
-Polled every 15 minutes by default (`FLIGHTS_POLL_INTERVAL_MS`), independently of the parking poller, with the same exponential backoff on failure. Disable with `POLL_FLIGHTS=0`.
+Polled every 5 minutes by default (`FLIGHTS_POLL_INTERVAL_MS`), independently of the parking poller, with the same exponential backoff on failure. Disable with `POLL_FLIGHTS=0`.
 
 ## How it stores data
 
@@ -110,7 +110,9 @@ Vanilla HTML, CSS, and JavaScript in `public/`, no framework, no build step. Ref
 
 Two dashed reference-line toggles, "Typical day" (blended across all stored days) and "Same weekday" (only same-weekday days), overlay each lot's typical hour-of-day curve; "Same weekday" stays disabled until a lot has enough same-weekday history to mean anything. A third toggle group (per-flight vertical markers for arrivals/departures) exists in the code but is switched off by default (`FLIGHTS_CHART_MARKERS_ENABLED` in `app.js`) — even scoped to short ranges, one day's ~20 flights read as clutter; the flag is a one-line flip to bring it back.
 
-**Flight board.** Two columns, Arrivals and Departures, at the bottom of the page, window tied to whichever chart range is selected. Airline + flight number are one linked cell to that flight's FlightAware page, when the airline maps to a known ICAO code (`AIRLINE_ICAO` in `app.js`); an unmapped airline just renders as text rather than a guessed, possibly-wrong link. Stale flights (see above) and flights that reached a confirmed outcome more than 30 minutes ago both drop off the list silently, no per-row warning, the same way the live source itself just stops listing a finished arrival.
+**Flight board.** Two columns, Arrivals and Departures, at the bottom of the page, window tied to whichever chart range is selected. Airline + flight number are one linked cell to that flight's FlightAware page, when the airline maps to a known ICAO code (`AIRLINE_ICAO` in `app.js`); an unmapped airline just renders as text rather than a guessed, possibly-wrong link. Rows sort and show by expected time, with the scheduled time underneath when the board revised it; Delayed, Early and Canceled get a colored dot. Stale flights (see above) and flights that reached a confirmed outcome more than 30 minutes ago both drop off the list silently, no per-row warning, the same way the live source itself just stops listing a finished flight.
+
+**Tracker status.** A collapsed footer panel with each poller's last result, interval, failures in the last 24 h, and the last error verbatim. The header only says a poll failed and points there, so an outage never puts a raw error at the top of the page.
 
 **Footer.** A collapsed "About the data" disclosure (ADA-parking note, data sources, the flight-tracking caveat) instead of always-visible callout text, plus a site credit link.
 
@@ -121,8 +123,7 @@ A Cloudflare Worker (`src/worker.ts`, config in `wrangler.toml`) with D1 for sto
 | piece | how |
 |---|---|
 | page and API | `fetch` handler; strips `BASE_PATH` (`/sba-parking`), serves `public/` through the Static Assets binding, stamps asset hashes into `index.html` like the Node server does |
-| parking poller | Cron Trigger `*/5 * * * *` calling `pollOnce` |
-| flights poller | Cron Trigger `*/15 * * * *` calling `pollFlightsOnce` |
+| pollers | one Cron Trigger `*/5 * * * *` running `pollOnce` and `pollFlightsOnce` side by side, so one failing never skips the other |
 | backoff | a cron can't reschedule itself, so after failures it skips ticks until the same exponential wait the Node pollers use has passed (`dueForPoll`) |
 | routing | route `around805.com/sba-parking*`. around805.com has a catch-all Redirect Rule to gutentag.world, and redirect rules run before Workers, so `/sba-parking` is listed in that rule's exceptions |
 
@@ -159,7 +160,7 @@ The Node app still runs anywhere on its own (`pnpm start`) with polling on, if t
 
 ## Upstream etiquette
 
-- One poll every 5 minutes for parking, every 15 for flights, one process each. Never poll per page view; the page reads the local database.
+- One poll every 5 minutes for each feed, one process each. Never poll per page view; the page reads the local database.
 - Descriptive `User-Agent` with a contact address, sent to both upstreams.
 - Serve stale data on error rather than retrying hard.
 - Airport parking office, if a heads-up ever seems warranted: (805) 967-2745, Reimagined Parking.

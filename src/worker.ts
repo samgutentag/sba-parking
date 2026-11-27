@@ -17,9 +17,9 @@ interface Env {
   BASE_PATH?: string
 }
 
-// Must match [triggers] crons in wrangler.toml.
-const PARKING_CRON = '*/5 * * * *'
-const FLIGHTS_CRON = '*/15 * * * *'
+// Must match [triggers] crons in wrangler.toml. One trigger runs both pollers: two triggers on
+// the same schedule would be indistinguishable in controller.cron.
+const POLL_CRON = '*/5 * * * *'
 
 // How long each API response is reused at the edge before D1 is asked again. D1 bills by rows
 // scanned, and /api/typical and long /api/history ranges scan most of the table, so without
@@ -147,27 +147,35 @@ function dueForPoll(recent: PollRow[], intervalMs: number, nowMs: number): boole
 // Enough history to reach the backoff cap from either interval.
 const BACKOFF_LOOKBACK = 8
 
+async function pollParking(db: D1Store, now: number): Promise<void> {
+  if (!config.pollEnabled) return
+  if (!dueForPoll(await db.recentPolls(BACKOFF_LOOKBACK), config.pollIntervalMs, now)) {
+    console.log('poll skipped: backing off after failures')
+    return
+  }
+  const outcome = await pollOnce(db)
+  console.log(outcome.ok ? `poll ok: ${outcome.inserted} new of ${outcome.seen} lots` : `poll failed: ${outcome.error}`)
+}
+
+async function pollFlights(db: D1Store, now: number): Promise<void> {
+  if (!config.flightsPollEnabled) return
+  if (!dueForPoll(await db.recentFlightPolls(BACKOFF_LOOKBACK), config.flightsPollIntervalMs, now)) {
+    console.log('flights poll skipped: backing off after failures')
+    return
+  }
+  const outcome = await pollFlightsOnce(db)
+  console.log(outcome.ok ? `flights poll ok: ${outcome.inserted} new of ${outcome.seen} flights` : `flights poll failed: ${outcome.error}`)
+}
+
 async function runCron(cron: string, db: D1Store): Promise<void> {
+  if (cron !== POLL_CRON) {
+    console.log(`cron ${cron}: nothing to do`)
+    return
+  }
   const now = Date.now()
-  if (cron === PARKING_CRON && config.pollEnabled) {
-    if (!dueForPoll(await db.recentPolls(BACKOFF_LOOKBACK), config.pollIntervalMs, now)) {
-      console.log('poll skipped: backing off after failures')
-      return
-    }
-    const outcome = await pollOnce(db)
-    console.log(outcome.ok ? `poll ok: ${outcome.inserted} new of ${outcome.seen} lots` : `poll failed: ${outcome.error}`)
-    return
-  }
-  if (cron === FLIGHTS_CRON && config.flightsPollEnabled) {
-    if (!dueForPoll(await db.recentFlightPolls(BACKOFF_LOOKBACK), config.flightsPollIntervalMs, now)) {
-      console.log('flights poll skipped: backing off after failures')
-      return
-    }
-    const outcome = await pollFlightsOnce(db)
-    console.log(outcome.ok ? `flights poll ok: ${outcome.inserted} new of ${outcome.seen} flights` : `flights poll failed: ${outcome.error}`)
-    return
-  }
-  console.log(`cron ${cron}: nothing to do`)
+  // Independent upstreams: one failing (or throwing on a D1 error) mustn't skip the other.
+  const results = await Promise.allSettled([pollParking(db, now), pollFlights(db, now)])
+  for (const r of results) if (r.status === 'rejected') console.error(r.reason)
 }
 
 export default {

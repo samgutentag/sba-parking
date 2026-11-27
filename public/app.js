@@ -30,16 +30,17 @@ function flightAwareUrl(airlineCode, flightNumber) {
   return icao ? `https://www.flightaware.com/live/flight/${icao}${flightNumber}` : null
 }
 
-// Same terminal-remark set as isFlightStale on the server: a confirmed outcome, not a guess.
-// Once one of these is 30+ minutes past its scheduled time, the flight board drops it rather
-// than let the board grow indefinitely with flights nobody needs to see anymore.
-const FLIGHT_TERMINAL_REMARKS = new Set(['departed', 'landed', 'arrived', 'cancelled', 'canceled'])
+// `terminal` comes from the server (departed, arrived, canceled: a confirmed outcome, not a
+// guess). Once one of these is 30+ minutes past its expected time, the flight board drops it
+// rather than let the board grow indefinitely with flights nobody needs to see anymore.
 const FLIGHT_BOARD_COMPLETED_AFTER_MS = 30 * 60_000
 function isFlightDoneAndOld(f) {
-  const remark = (f.remark || '').trim().toLowerCase()
-  if (!FLIGHT_TERMINAL_REMARKS.has(remark)) return false
-  return Date.now() - Date.parse(f.scheduledAt) > FLIGHT_BOARD_COMPLETED_AFTER_MS
+  if (!f.terminal) return false
+  return Date.now() - Date.parse(f.expectedAt) > FLIGHT_BOARD_COMPLETED_AFTER_MS
 }
+
+// Status words that get a color on the board; everything else renders plain.
+const FLIGHT_STATUS_CLASS = { Delayed: 'status-delayed', Early: 'status-early', Canceled: 'status-canceled' }
 
 // Who a gap in the readings is on, as the server works it out from its own poll log.
 const GAP_LABEL = {
@@ -109,7 +110,7 @@ const $ = (id) => document.getElementById(id)
 const els = {
   sourceLine: $('source-line'), sourceLineMobile: $('source-line-mobile'), tiles: $('tiles'), legend: $('legend'), chart: $('chart'),
   chartWrap: $('chart-wrap'), chartEmpty: $('chart-empty'), tooltip: $('tooltip'),
-  historyLine: $('history-line'), chartStatus: $('chart-status'), typicalGroup: $('typical-group'),
+  historyLine: $('history-line'), trackerStatusBody: $('tracker-status-body'), trackerStatusSummary: $('tracker-status-summary'), chartStatus: $('chart-status'), typicalGroup: $('typical-group'),
   flightsGroup: $('flights-group'),
   flightsBoardSub: $('flights-board-sub'),
   arrivalsTable: $('arrivals-table'), arrivalsEmpty: $('arrivals-empty'), arrivalsHeading: $('arrivals-heading'),
@@ -503,6 +504,33 @@ function hourBarsEl(buckets) {
   return wrap
 }
 
+// Tracker status, in the footer: each poller's last result, verbatim error included. Kept out
+// of the header so an outage reads as one quiet line up top, with the detail here for whoever
+// wants it. Each poller fills its own row as its data loads.
+const trackerPollers = {}
+function renderTrackerStatus(key, label, p) {
+  trackerPollers[key] = { label, p }
+  const rows = Object.values(trackerPollers).map(({ label, p }) => {
+    const row = document.createElement('p')
+    if (!p.enabled) {
+      row.textContent = `${label}: polling disabled on this instance.`
+      return row
+    }
+    const outcome = p.lastPollOk === false ? 'failed' : 'ok'
+    row.textContent = `${label}: last poll ${p.lastPollAt ? relative(p.lastPollAt) : 'never'} (${outcome}), every ${Math.round(p.intervalMs / 60_000)} min, ${p.failedLast24h} failed in the last 24 h.`
+    if (p.lastPollOk === false && p.lastError) {
+      const err = document.createElement('code')
+      err.className = 'tracker-error'
+      err.textContent = p.lastError
+      row.append(document.createElement('br'), err)
+    }
+    return row
+  })
+  els.trackerStatusBody.replaceChildren(...rows)
+  const failing = Object.values(trackerPollers).some(({ p }) => p.enabled && p.lastPollOk === false)
+  els.trackerStatusSummary.textContent = failing ? 'Tracker status: a poll is failing' : 'Tracker status'
+}
+
 function renderSourceLine(latest) {
   const p = latest.poller
   const dot = document.createElement('span')
@@ -519,7 +547,8 @@ function renderSourceLine(latest) {
     if (p.lastPollOk === false) dot.classList.add('bad')
     else if (ageMs > p.intervalMs * 3) dot.classList.add('stale')
     text = `Last poll ${relative(p.lastPollAt)}`
-    if (p.lastPollOk === false && p.lastError) text += ` failed (${p.lastError})`
+    // The raw error belongs in Tracker status at the bottom, not in the page's headline.
+    if (p.lastPollOk === false) text += ' failed · details under Tracker status below'
     else if (latest.feed?.stale && latest.lots[0]) {
       dot.classList.add('stale')
       text += ` · ${latest.feed.cause === 'paused' ? 'airport feed paused' : 'no new data'} since ${fmt.time.format(new Date(latest.lots[0].sourceUpdatedAt))} PT`
@@ -531,6 +560,8 @@ function renderSourceLine(latest) {
   // reorder across.
   els.sourceLine.replaceChildren(dot, document.createTextNode(text))
   els.sourceLineMobile.replaceChildren(dot.cloneNode(true), document.createTextNode(text))
+
+  renderTrackerStatus('parking', 'Parking', p)
 
   const h = latest.history
   els.historyLine.textContent = h.readings
@@ -976,7 +1007,7 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
   // far enough past due that they're no longer "what's happening now."
   const sorted = rows
     .filter((f) => !f.stale && !isFlightDoneAndOld(f))
-    .sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))
+    .sort((a, b) => Date.parse(a.expectedAt) - Date.parse(b.expectedAt))
   headingEl.replaceChildren(flightIconSvg(kind), document.createTextNode(` ${label} (${sorted.length})`))
   table.replaceChildren()
 
@@ -1004,8 +1035,16 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
   for (const f of shown) {
     const tr = document.createElement('tr')
 
+    // Expected time first, since that's when the plane actually shows up. The scheduled time
+    // rides along underneath whenever the board has revised it.
     const timeTd = document.createElement('td')
-    timeTd.textContent = timeFmt.format(new Date(f.scheduledAt))
+    timeTd.textContent = timeFmt.format(new Date(f.expectedAt))
+    if (Math.abs(Date.parse(f.expectedAt) - Date.parse(f.scheduledAt)) >= 60_000) {
+      const sched = document.createElement('span')
+      sched.className = 'sched'
+      sched.textContent = `sched ${timeFmt.format(new Date(f.scheduledAt))}`
+      timeTd.append(sched)
+    }
     tr.append(timeTd)
 
     // Airline + flight number combined into one cell, linked to FlightAware when the airline
@@ -1026,11 +1065,15 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
     }
     tr.append(flightTd)
 
-    for (const v of [f.city, f.gate || '–', f.remark || '–']) {
+    for (const v of [f.city, f.gate || '–']) {
       const td = document.createElement('td')
       td.textContent = v
       tr.append(td)
     }
+    const statusTd = document.createElement('td')
+    statusTd.textContent = f.status || '–'
+    if (FLIGHT_STATUS_CLASS[f.status]) statusTd.className = FLIGHT_STATUS_CLASS[f.status]
+    tr.append(statusTd)
     tbody.append(tr)
   }
   table.append(thead, tbody)
@@ -1048,6 +1091,7 @@ function renderFlightsColumn(table, emptyEl, headingEl, kind, label, rows, multi
 }
 
 function renderFlightsBoard(data) {
+  renderTrackerStatus('flights', 'Flights', data.poller)
   const total = data.flights.length
   const multiDay = Date.parse(data.untilAt) - Date.parse(data.sinceAt) > 36 * 3600_000
   els.flightsBoardSub.textContent = total

@@ -185,6 +185,18 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .about-data p { margin: 6px 0; }
 .about-data p:last-child { margin-bottom: 0; }
 .about-data strong { color: var(--ink); }
+.tracker-status { margin-top: 10px; }
+.tracker-error { display: block; margin-top: 4px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.flights-col td .sched { display: block; color: var(--muted); font-size: 11px; }
+/* Status colors as a dot, not text color: the orange and green fail contrast as text on the light theme. */
+.flights-col td[class^="status-"] { font-weight: 600; }
+.flights-col td[class^="status-"]::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; vertical-align: 1px; background: var(--dot-color);
+}
+.flights-col td.status-delayed { --dot-color: var(--status-serious); }
+.flights-col td.status-early { --dot-color: var(--status-good); }
+.flights-col td.status-canceled { --dot-color: var(--status-critical); }
 .built-by { margin: 14px 0 0; color: var(--muted); font-size: 13px; text-align: center; }
 .built-by a { color: inherit; }
 

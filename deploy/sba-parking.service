@@ -17,7 +17,7 @@ Environment=HOST=127.0.0.1
 Environment=DB_PATH=/opt/sba-parking/data/parking.db
 Environment=USER_AGENT=sba-parking-tracker/0.1 (+mailto:you@example.com)
 Environment=POLL_FLIGHTS=1
-Environment=FLIGHTS_POLL_INTERVAL_MS=900000
+Environment=FLIGHTS_POLL_INTERVAL_MS=300000
 
 [Install]
 WantedBy=multi-user.target

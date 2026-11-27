@@ -27,6 +27,6 @@ export const config = {
   // It's a live board (today's flights only), not a history, so there's nothing to correlate
   // against parking occupancy until this has been polled and stored for a while.
   flightsPollEnabled: env.POLL_FLIGHTS !== '0',
-  flightsPollIntervalMs: positiveInt(env.FLIGHTS_POLL_INTERVAL_MS, 15 * 60_000),
+  flightsPollIntervalMs: positiveInt(env.FLIGHTS_POLL_INTERVAL_MS, 5 * 60_000),
   flightsSourceUrl: env.FLIGHTS_SOURCE_URL ?? 'https://infax.com/webfids/sba/fids-sba.json',
 } as const

@@ -3,6 +3,7 @@
 
 import { v1Hourly, v1Latest, V1BadRequest } from './api-v1.ts'
 import { config } from './config.ts'
+import { flightTiming, isTerminalStatus } from './flight-status.ts'
 import type { ParkingStore } from './store.ts'
 import { relativeStatusFor, statusFor } from './status.ts'
 import { isoFromEpochSeconds, localMidnightMs, localTimeParts, nextLocalMidnightMs } from './time.ts'
@@ -205,16 +206,15 @@ async function typicalPayload(db: ParkingStore) {
 // Diagnostic view of the flights feed: poller health, storage stats, and today's board so
 // far. No correlation or prediction here on purpose — there isn't enough history yet to say
 // anything about parking surges; this just proves the second poller is alive and storing.
-// A flight is "stale" once it's past due and hasn't been reconfirmed in a couple of poll
-// cycles — the live board (see flights-source.ts) simply drops completed arrivals rather than
-// marking them done, unlike departures, which get a "DEPARTED" remark. So an old, unconfirmed
-// "ON TIME" almost always means the flight fell off the board, not that it's still pending.
-// A flight that already reached a terminal remark is never stale, no matter how long ago that
-// was: that's a confirmed outcome, not a guess.
-const FLIGHT_TERMINAL_REMARKS = new Set(['departed', 'landed', 'arrived', 'cancelled', 'canceled'])
-function isFlightStale(scheduledTs: number, lastSeenUtc: string, remark: string, nowMs: number): boolean {
-  if (FLIGHT_TERMINAL_REMARKS.has(remark.trim().toLowerCase())) return false
-  const pastDue = nowMs > scheduledTs * 1000 + config.flightsPollIntervalMs
+// A flight is "stale" once it's past its expected time and hasn't been reconfirmed in a couple
+// of poll cycles: the live board drops a flight a while after it's done, often without ever
+// posting DEPARTED or ARRIVED, so an old, unconfirmed "On time" almost always means the flight
+// fell off the board, not that it's still pending. Measured against the expected time (the
+// board's revised "Now" time when there is one), so a delayed flight isn't dropped while it's
+// still coming. A confirmed outcome is never stale, no matter how long ago it was.
+function isFlightStale(expectedTs: number, lastSeenUtc: string, status: string, nowMs: number): boolean {
+  if (isTerminalStatus(status)) return false
+  const pastDue = nowMs > expectedTs * 1000 + config.flightsPollIntervalMs
   const unconfirmed = nowMs - Date.parse(lastSeenUtc) > config.flightsPollIntervalMs * 2
   return pastDue && unconfirmed
 }
@@ -256,18 +256,24 @@ async function flightsPayload(db: ParkingStore, url: URL) {
       earliestAt: stats.earliest_ts === null ? null : isoFromEpochSeconds(stats.earliest_ts),
       latestAt: stats.latest_ts === null ? null : isoFromEpochSeconds(stats.latest_ts),
     },
-    flights: rows.map((r) => ({
-      type: r.type === 'A' ? 'arrival' : 'departure',
-      airline: r.airline,
-      airlineCode: r.airline_code,
-      flightNumber: r.flight_number,
-      city: r.city,
-      scheduledAt: isoFromEpochSeconds(r.scheduled_ts),
-      gate: r.gate,
-      remark: r.remark,
-      lastSeenAt: r.last_seen_utc,
-      stale: isFlightStale(r.scheduled_ts, r.last_seen_utc, r.remark, nowMs),
-    })),
+    flights: rows.map((r) => {
+      const { expectedTs, status } = flightTiming(r.scheduled_ts, r.remark, config.sourceTimeZone)
+      return {
+        type: r.type === 'A' ? 'arrival' : 'departure',
+        airline: r.airline,
+        airlineCode: r.airline_code,
+        flightNumber: r.flight_number,
+        city: r.city,
+        scheduledAt: isoFromEpochSeconds(r.scheduled_ts),
+        expectedAt: isoFromEpochSeconds(expectedTs),
+        gate: r.gate,
+        status,
+        terminal: isTerminalStatus(status),
+        remark: r.remark,
+        lastSeenAt: r.last_seen_utc,
+        stale: isFlightStale(expectedTs, r.last_seen_utc, status, nowMs),
+      }
+    }),
     notes: ["Live flight board, not a schedule archive. Source: Infax's FIDS widget, embedded on the airport's own arrivals-departures page."],
   }
 }
