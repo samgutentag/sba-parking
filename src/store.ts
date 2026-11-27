@@ -102,6 +102,8 @@ export interface ParkingStore {
   /** Raw readings since `sinceTs`, for bucketing into typical-day / typical-day-of-week baselines. */
   typicalRaw(sinceTs: number): Promise<TypicalRawRow[]>
   lastPoll(): Promise<PollRow | undefined>
+  /** Newest first. The Worker reads these to back off on failure, since its cron can't reschedule itself. */
+  recentPolls(limit: number): Promise<PollRow[]>
   stats(): Promise<StoreStats>
   /** Stretches longer than `minGapSeconds` where the airport's own timestamp didn't advance. */
   readingGaps(sinceTs: number, minGapSeconds: number): Promise<GapRow[]>
@@ -113,6 +115,7 @@ export interface ParkingStore {
   recordFlightPoll(poll: PollRecord, nowIso: string): Promise<void>
   flightsInRange(sinceTs: number, untilTs: number): Promise<FlightRow[]>
   lastFlightPoll(): Promise<PollRow | undefined>
+  recentFlightPolls(limit: number): Promise<PollRow[]>
   flightStats(): Promise<FlightStoreStats>
 
   close(): Promise<void>
@@ -223,6 +226,8 @@ export const SQL = {
 
   lastPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT 1',
 
+  recentPolls: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT ?1',
+
   // ?1 since epoch seconds, ?2 minimum gap seconds. Every lot shares the feed's one timestamp,
   // so gaps are found across distinct timestamps, not per lot. Starts from the last reading
   // *before* the window so a gap straddling its left edge still shows up.
@@ -275,6 +280,8 @@ export const SQL = {
     ORDER BY scheduled_ts`,
 
   lastFlightPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM flight_polls ORDER BY id DESC LIMIT 1',
+
+  recentFlightPolls: 'SELECT ts_utc, ok, http_status, new_rows, error FROM flight_polls ORDER BY id DESC LIMIT ?1',
 
   // ?1 ISO timestamp 24 hours ago.
   flightStats: `

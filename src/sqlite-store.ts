@@ -30,6 +30,7 @@ export class SqliteStore implements ParkingStore {
   #history
   #typicalRaw
   #lastPoll
+  #recentPolls
   #stats
   #readingGaps
   #pollCounts
@@ -37,6 +38,7 @@ export class SqliteStore implements ParkingStore {
   #insertFlightPoll
   #flightsInRange
   #lastFlightPoll
+  #recentFlightPolls
   #flightStats
 
   constructor(path: string) {
@@ -51,6 +53,7 @@ export class SqliteStore implements ParkingStore {
     this.#history = this.#db.prepare(SQL.history)
     this.#typicalRaw = this.#db.prepare(SQL.typicalRaw)
     this.#lastPoll = this.#db.prepare(SQL.lastPoll)
+    this.#recentPolls = this.#db.prepare(SQL.recentPolls)
     this.#stats = this.#db.prepare(SQL.stats)
     this.#readingGaps = this.#db.prepare(SQL.readingGaps)
     this.#pollCounts = this.#db.prepare(SQL.pollCounts)
@@ -58,6 +61,7 @@ export class SqliteStore implements ParkingStore {
     this.#insertFlightPoll = this.#db.prepare(SQL.insertFlightPoll)
     this.#flightsInRange = this.#db.prepare(SQL.flightsInRange)
     this.#lastFlightPoll = this.#db.prepare(SQL.lastFlightPoll)
+    this.#recentFlightPolls = this.#db.prepare(SQL.recentFlightPolls)
     this.#flightStats = this.#db.prepare(SQL.flightStats)
   }
 
@@ -97,6 +101,10 @@ export class SqliteStore implements ParkingStore {
 
   async lastPoll(): Promise<PollRow | undefined> {
     return this.#lastPoll.get() as unknown as PollRow | undefined
+  }
+
+  async recentPolls(limit: number): Promise<PollRow[]> {
+    return this.#recentPolls.all(limit) as unknown as PollRow[]
   }
 
   async stats(): Promise<StoreStats> {
@@ -141,6 +149,10 @@ export class SqliteStore implements ParkingStore {
 
   async lastFlightPoll(): Promise<PollRow | undefined> {
     return this.#lastFlightPoll.get() as unknown as PollRow | undefined
+  }
+
+  async recentFlightPolls(limit: number): Promise<PollRow[]> {
+    return this.#recentFlightPolls.all(limit) as unknown as PollRow[]
   }
 
   async flightStats(): Promise<FlightStoreStats> {

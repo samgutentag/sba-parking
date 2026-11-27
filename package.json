@@ -12,10 +12,14 @@
     "dev": "node --watch --disable-warning=ExperimentalWarning src/main.ts",
     "poll": "node --disable-warning=ExperimentalWarning src/poll-once.ts",
     "poll:flights": "node --disable-warning=ExperimentalWarning src/flights-poll-once.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
+    "worker:dev": "wrangler dev --test-scheduled",
+    "worker:deploy": "wrangler deploy"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261125.1",
     "@types/node": "^24.3.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "wrangler": "4.168.0"
   }
 }
