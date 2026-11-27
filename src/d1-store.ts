@@ -17,7 +17,7 @@ import {
   type PollRecord,
   type PollRow,
   type StoreStats,
-  type TypicalRawRow,
+  type RollupRow,
   type CacheRow,
 } from './store.ts'
 
@@ -64,12 +64,16 @@ export class D1Store implements ParkingStore {
   }
 
   async recordReadings(readings: LotReading[], nowIso: string): Promise<{ inserted: number; seen: number }> {
+    // Each reading's rollup upsert rides in the same batch (one transaction) right after it.
     const inserted = await this.#upsertBatch(
-      readings.map((r) =>
+      readings.flatMap((r) => [
         this.#db.prepare(SQL.upsertReading).bind(
           r.lotId, r.lotName, r.total, r.occupied, r.sourceUpdated, r.sourceUpdatedTs, nowIso,
         ),
-      ),
+        this.#db.prepare(SQL.upsertRollup).bind(
+          r.lotId, r.lotName, r.total, r.occupied, r.sourceUpdated, r.sourceUpdatedTs,
+        ),
+      ]),
     )
     return { inserted, seen: readings.length }
   }
@@ -86,12 +90,16 @@ export class D1Store implements ParkingStore {
     return this.#all<HistoryRow>(SQL.history, Math.max(1, bucketSeconds), sinceTs)
   }
 
-  typicalRaw(sinceTs: number): Promise<TypicalRawRow[]> {
-    return this.#all<TypicalRawRow>(SQL.typicalRaw, sinceTs)
+  historyRollup(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]> {
+    return this.#all<HistoryRow>(SQL.historyRollup, bucketSeconds, sinceTs)
   }
 
-  readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]> {
-    return this.#all<TypicalRawRow>(SQL.readingsBetween, sinceTs, untilTs)
+  readingGapsRollup(sinceTs: number, minGapSeconds: number): Promise<GapRow[]> {
+    return this.#all<GapRow>(SQL.readingGapsRollup, sinceTs, minGapSeconds)
+  }
+
+  rollupBetween(sinceTs: number, untilTs: number): Promise<RollupRow[]> {
+    return this.#all<RollupRow>(SQL.rollupBetween, sinceTs, untilTs)
   }
 
   lastPoll(): Promise<PollRow | undefined> {

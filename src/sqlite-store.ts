@@ -19,7 +19,7 @@ import {
   type PollRecord,
   type PollRow,
   type StoreStats,
-  type TypicalRawRow,
+  type RollupRow,
   type CacheRow,
 } from './store.ts'
 
@@ -29,8 +29,10 @@ export class SqliteStore implements ParkingStore {
   #insertPoll
   #latest
   #history
-  #typicalRaw
-  #readingsBetween
+  #upsertRollup
+  #historyRollup
+  #readingGapsRollup
+  #rollupBetween
   #lastPoll
   #recentPolls
   #stats
@@ -55,8 +57,14 @@ export class SqliteStore implements ParkingStore {
     this.#insertPoll = this.#db.prepare(SQL.insertPoll)
     this.#latest = this.#db.prepare(SQL.latest)
     this.#history = this.#db.prepare(SQL.history)
-    this.#typicalRaw = this.#db.prepare(SQL.typicalRaw)
-    this.#readingsBetween = this.#db.prepare(SQL.readingsBetween)
+    this.#upsertRollup = this.#db.prepare(SQL.upsertRollup)
+    this.#historyRollup = this.#db.prepare(SQL.historyRollup)
+    this.#readingGapsRollup = this.#db.prepare(SQL.readingGapsRollup)
+    this.#rollupBetween = this.#db.prepare(SQL.rollupBetween)
+    // A database with readings from before the rollup existed (an older backup, say) gets it
+    // built once here. Cheap locally; on D1 the same rebuild is a one-off manual step.
+    const { needs_rebuild } = this.#db.prepare(SQL.rollupEmpty).get() as { needs_rebuild: number }
+    if (needs_rebuild) this.#db.exec(SQL.rebuildRollup)
     this.#lastPoll = this.#db.prepare(SQL.lastPoll)
     this.#recentPolls = this.#db.prepare(SQL.recentPolls)
     this.#stats = this.#db.prepare(SQL.stats)
@@ -80,6 +88,7 @@ export class SqliteStore implements ParkingStore {
         const row = this.#upsertReading.get(
           r.lotId, r.lotName, r.total, r.occupied, r.sourceUpdated, r.sourceUpdatedTs, nowIso,
         ) as { inserted: number } | undefined
+        this.#upsertRollup.run(r.lotId, r.lotName, r.total, r.occupied, r.sourceUpdated, r.sourceUpdatedTs)
         if (row?.inserted) inserted++
       }
       this.#db.exec('COMMIT')
@@ -102,12 +111,16 @@ export class SqliteStore implements ParkingStore {
     return this.#history.all(Math.max(1, bucketSeconds), sinceTs) as unknown as HistoryRow[]
   }
 
-  async typicalRaw(sinceTs: number): Promise<TypicalRawRow[]> {
-    return this.#typicalRaw.all(sinceTs) as unknown as TypicalRawRow[]
+  async historyRollup(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]> {
+    return this.#historyRollup.all(bucketSeconds, sinceTs) as unknown as HistoryRow[]
   }
 
-  async readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]> {
-    return this.#readingsBetween.all(sinceTs, untilTs) as unknown as TypicalRawRow[]
+  async readingGapsRollup(sinceTs: number, minGapSeconds: number): Promise<GapRow[]> {
+    return this.#readingGapsRollup.all(sinceTs, minGapSeconds) as unknown as GapRow[]
+  }
+
+  async rollupBetween(sinceTs: number, untilTs: number): Promise<RollupRow[]> {
+    return this.#rollupBetween.all(sinceTs, untilTs) as unknown as RollupRow[]
   }
 
   async lastPoll(): Promise<PollRow | undefined> {

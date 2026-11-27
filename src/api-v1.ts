@@ -91,15 +91,16 @@ function localDay(dateParam: string | null, nowMs: number): { date: string; sinc
 export async function v1Hourly(db: ParkingStore, dateParam: string | null): Promise<V1HourlyRow[]> {
   const tz = config.sourceTimeZone
   const { date, sinceTs, untilTs } = localDay(dateParam, Date.now())
-  const [lots, readings] = await Promise.all([db.latest(), db.readingsBetween(sinceTs, untilTs)])
+  const [lots, buckets] = await Promise.all([db.latest(), db.rollupBetween(sinceTs, untilTs)])
 
+  // Sums and counts from the 15-minute rollup add up to exactly the raw hourly average.
   const sums = new Map<string, { occupied: number; total: number; n: number }>()
-  for (const r of readings) {
-    const key = `${r.lot_id}|${localTimeParts(r.source_updated_ts, tz).hour}`
+  for (const b of buckets) {
+    const key = `${b.lot_id}|${localTimeParts(b.bucket_ts, tz).hour}`
     const s = sums.get(key) ?? { occupied: 0, total: 0, n: 0 }
-    s.occupied += r.occupied
-    s.total = Math.max(s.total, r.total)
-    s.n++
+    s.occupied += b.occupied_sum
+    s.total = Math.max(s.total, b.total)
+    s.n += b.samples
     sums.set(key, s)
   }
 

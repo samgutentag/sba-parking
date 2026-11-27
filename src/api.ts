@@ -13,8 +13,8 @@ import { computeTypical, type TypicalLot } from './typical.ts'
 // `seconds` is unused for 'today' and 'all' — both compute their own since/until below.
 const RANGES: Record<string, { seconds: number; bucket: number }> = {
   '6h': { seconds: 6 * 3600, bucket: 60 },
-  '24h': { seconds: 24 * 3600, bucket: 60 }, // rolling trailing 24h; kept for internal/API use
-  today: { seconds: 0, bucket: 60 }, // the chart's "24h" button: local midnight to midnight
+  '24h': { seconds: 24 * 3600, bucket: 15 * 60 }, // rolling trailing 24h; the tiles' trend and hour bars
+  today: { seconds: 0, bucket: 15 * 60 }, // the chart's "24h" button: local midnight to midnight
   '7d': { seconds: 7 * 86400, bucket: 15 * 60 },
   '30d': { seconds: 30 * 86400, bucket: 3600 },
   '90d': { seconds: 90 * 86400, bucket: 3 * 3600 },
@@ -31,7 +31,7 @@ const MIN_DAYS_FOR_DAY_OF_WEEK = 3
 // Below this many distinct days of *any* history, a lot's "typical for this hour" is really
 // just "what happened once," so /api/latest falls back to the fixed-percent status instead.
 const MIN_DAYS_FOR_TYPICAL_STATUS = 3
-// Recomputing this reads up to 90 days of readings, which on D1 is billed row by row, so the
+// Recomputing this reads up to 90 days of the 15-minute rollup, billed row by row on D1, so the
 // result is kept in the store's cache table and rebuilt at most every TYPICAL_STORE_MS. A
 // shorter in-memory copy saves even that one-row read for back-to-back requests. Shared by
 // /api/typical and /api/latest. The baselines move slowly; hours-old is fine.
@@ -50,11 +50,22 @@ async function getTypicalLots(db: ParkingStore): Promise<TypicalSnapshot> {
   }
   const now = Math.floor(Date.now() / 1000)
   const sinceTs = Math.max(0, now - TYPICAL_WINDOW_SECONDS)
-  const rows = await db.typicalRaw(sinceTs)
+  const rows = await db.rollupBetween(sinceTs, now + 1)
   const snapshot: TypicalSnapshot = {
     sinceAt: isoFromEpochSeconds(sinceTs),
     untilAt: isoFromEpochSeconds(now),
-    lots: computeTypical(rows, config.sourceTimeZone),
+    lots: computeTypical(
+      rows.map((r) => ({
+        lot_id: r.lot_id,
+        lot_name: r.lot_name,
+        total: r.total,
+        occupied: r.occupied_sum / r.samples,
+        // Bucket starts are quarter hours, so they land in the same local hour as their readings.
+        source_updated_ts: r.bucket_ts,
+        weight: r.samples,
+      })),
+      config.sourceTimeZone,
+    ),
   }
   // A failed write (say, D1's daily write limit) shouldn't fail the request that computed it.
   await db.cacheSet('typical', JSON.stringify(snapshot), new Date().toISOString()).catch((err) => console.error('typical cache write failed', err))
@@ -80,9 +91,14 @@ async function gapCause(db: ParkingStore, fromTs: number, toTs: number): Promise
   return 'offline'
 }
 
-async function gapsPayload(db: ParkingStore, sinceTs: number, latestTs: number | null) {
+// Buckets of 15 minutes or more come from the 15-minute rollup; only finer ones (the 6h range)
+// read raw readings, which over a few hours is a few hundred rows.
+const ROLLUP_SECONDS = 15 * 60
+const usesRollup = (bucket: number) => bucket >= ROLLUP_SECONDS && bucket % ROLLUP_SECONDS === 0
+
+async function gapsPayload(db: ParkingStore, sinceTs: number, latestTs: number | null, rollup: boolean) {
   const now = Math.floor(Date.now() / 1000)
-  const rows = await db.readingGaps(sinceTs, FEED_STALE_SECONDS)
+  const rows = rollup ? await db.readingGapsRollup(sinceTs, FEED_STALE_SECONDS) : await db.readingGaps(sinceTs, FEED_STALE_SECONDS)
   const spans = rows.map((r) => ({ fromTs: r.from_ts, toTs: r.to_ts, ongoing: false }))
   // A gap that hasn't ended yet: nothing new since the latest reading. Its right edge is now.
   if (latestTs !== null && now - latestTs > FEED_STALE_SECONDS) spans.push({ fromTs: latestTs, toTs: now, ongoing: true })
@@ -177,12 +193,13 @@ async function historyPayload(db: ParkingStore, url: URL) {
     const stats = await db.stats()
     const span = stats.earliest_ts === null ? 0 : now - stats.earliest_ts
     // Aim for roughly 700 points per lot regardless of how long the poller has been running.
-    bucket = Math.max(60, Math.ceil(span / 700 / 60) * 60)
+    bucket = Math.max(ROLLUP_SECONDS, Math.ceil(span / 700 / ROLLUP_SECONDS) * ROLLUP_SECONDS)
     sinceTs = stats.earliest_ts ?? 0
   }
 
-  const [rows, stats] = await Promise.all([db.history(sinceTs, bucket), db.stats()])
-  const gaps = await gapsPayload(db, sinceTs, stats.latest_ts)
+  const rollup = usesRollup(bucket)
+  const [rows, stats] = await Promise.all([rollup ? db.historyRollup(sinceTs, bucket) : db.history(sinceTs, bucket), db.stats()])
+  const gaps = await gapsPayload(db, sinceTs, stats.latest_ts, rollup)
   const lots = new Map<string, { lotId: string; lotName: string; total: number; points: Array<[number, number, number]> }>()
   for (const r of rows) {
     let lot = lots.get(r.lot_id)

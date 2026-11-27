@@ -24,12 +24,16 @@ export interface HistoryRow {
   samples: number
 }
 
-export interface TypicalRawRow {
+/** One lot's readings within one 15-minute UTC bucket. Sums, not averages, so buckets combine exactly. */
+export interface RollupRow {
   lot_id: string
   lot_name: string
+  bucket_ts: number
+  occupied_sum: number
+  samples: number
   total: number
-  occupied: number
-  source_updated_ts: number
+  first_ts: number
+  last_ts: number
 }
 
 export interface PollRow {
@@ -99,10 +103,12 @@ export interface ParkingStore {
   recordPoll(poll: PollRecord, nowIso: string): Promise<void>
   latest(): Promise<LatestRow[]>
   history(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]>
-  /** Raw readings since `sinceTs`, for bucketing into typical-day / typical-day-of-week baselines. */
-  typicalRaw(sinceTs: number): Promise<TypicalRawRow[]>
-  /** Raw readings in [sinceTs, untilTs), for the public hourly endpoint. */
-  readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]>
+  /** Chart points from the 15-minute rollup; `bucketSeconds` must be a multiple of 900. */
+  historyRollup(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]>
+  /** Feed outages longer than `minGapSeconds`, found between rollup buckets. */
+  readingGapsRollup(sinceTs: number, minGapSeconds: number): Promise<GapRow[]>
+  /** Rollup rows in [sinceTs, untilTs), for typical-day baselines and the public hourly endpoint. */
+  rollupBetween(sinceTs: number, untilTs: number): Promise<RollupRow[]>
   lastPoll(): Promise<PollRow | undefined>
   /** Newest first. The Worker reads these to back off on failure, since its cron can't reschedule itself. */
   recentPolls(limit: number): Promise<PollRow[]>
@@ -191,6 +197,22 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     error TEXT
   )`,
   'CREATE INDEX IF NOT EXISTS flight_polls_ts ON flight_polls (ts_utc)',
+  // 15-minute rollup of readings, kept up to date on every new reading (see upsertRollup), so
+  // charts longer than a few hours, the typical-day baselines and the hourly API never read raw
+  // rows. On D1 every row read is billed, and this is about a fifth as many rows. WITHOUT
+  // ROWID makes the primary key the table itself, so a time-range read touches each row once.
+  // America/Los_Angeles is a whole-hour offset from UTC, so UTC quarter hours are local ones.
+  `CREATE TABLE IF NOT EXISTS readings_15m (
+    bucket_ts INTEGER NOT NULL,
+    lot_id TEXT NOT NULL,
+    lot_name TEXT NOT NULL,
+    occupied_sum INTEGER NOT NULL,
+    samples INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    first_ts INTEGER NOT NULL,
+    last_ts INTEGER NOT NULL,
+    PRIMARY KEY (bucket_ts, lot_id)
+  ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS cache (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -238,21 +260,75 @@ export const SQL = {
     GROUP BY lot_id, bucket_ts
     ORDER BY bucket_ts, lot_id`,
 
-  // ?1 since epoch seconds. Raw rows, not aggregated: hour-of-day and weekday depend on the
-  // airport's local timezone, which SQLite can't resolve portably (no tz data, and D1 would
-  // differ from node:sqlite's 'localtime' anyway), so that bucketing happens in JS instead.
-  typicalRaw: `
-    SELECT lot_id, lot_name, total, occupied, source_updated_ts
+  // Folds one reading into its 15-minute bucket, but only if that reading was just inserted:
+  // upsertReading leaves first_seen_utc = last_seen_utc on a fresh row and moves last_seen_utc
+  // on a repeat, so a repeat poll of an unchanged feed never double-counts. Same params as
+  // upsertReading (?1 lot, ?2 name, ?3 total, ?4 occupied, ?5 source_updated, ?6 ts), run right
+  // after it in the same transaction. The CAST keeps the division integer when a driver binds
+  // numbers as REAL.
+  upsertRollup: `
+    INSERT INTO readings_15m (bucket_ts, lot_id, lot_name, occupied_sum, samples, total, first_ts, last_ts)
+    SELECT (CAST(?6 AS INTEGER) / 900) * 900, ?1, ?2, ?4, 1, ?3, ?6, ?6
+    WHERE EXISTS (
+      SELECT 1 FROM readings
+      WHERE lot_id = ?1 AND source_updated = ?5 AND first_seen_utc = last_seen_utc
+    )
+    ON CONFLICT (bucket_ts, lot_id) DO UPDATE SET
+      lot_name = excluded.lot_name,
+      occupied_sum = occupied_sum + excluded.occupied_sum,
+      samples = samples + 1,
+      total = MAX(total, excluded.total),
+      first_ts = MIN(first_ts, excluded.first_ts),
+      last_ts = MAX(last_ts, excluded.last_ts)`,
+
+  // Rebuilds the whole rollup from raw readings. A full scan, so only for setup: a fresh
+  // database with history, or after importing readings. Safe to rerun.
+  rebuildRollup: `
+    INSERT OR REPLACE INTO readings_15m (bucket_ts, lot_id, lot_name, occupied_sum, samples, total, first_ts, last_ts)
+    SELECT (source_updated_ts / 900) * 900, lot_id, MAX(lot_name), SUM(occupied), COUNT(*), MAX(total),
+           MIN(source_updated_ts), MAX(source_updated_ts)
     FROM readings
-    WHERE source_updated_ts >= ?1
-    ORDER BY source_updated_ts`,
+    GROUP BY lot_id, (source_updated_ts / 900) * 900`,
+
+  rollupEmpty: 'SELECT NOT EXISTS (SELECT 1 FROM readings_15m) AND EXISTS (SELECT 1 FROM readings) AS needs_rebuild',
+
+  // ?1 bucket seconds (a multiple of 900), ?2 since epoch seconds. Averages weight each
+  // 15-minute bucket by its readings, so the result matches averaging the raw rows.
+  historyRollup: `
+    SELECT lot_id, MAX(lot_name) AS lot_name,
+           (bucket_ts / CAST(?1 AS INTEGER)) * CAST(?1 AS INTEGER) AS bucket_ts,
+           CAST(ROUND(SUM(occupied_sum) * 1.0 / SUM(samples)) AS INTEGER) AS occupied,
+           MAX(total) AS total,
+           SUM(samples) AS samples
+    FROM readings_15m
+    WHERE bucket_ts >= (CAST(?2 AS INTEGER) / 900) * 900
+    GROUP BY lot_id, (bucket_ts / CAST(?1 AS INTEGER)) * CAST(?1 AS INTEGER)
+    ORDER BY bucket_ts, lot_id`,
+
+  // ?1 since epoch seconds, ?2 minimum gap seconds. A gap longer than a bucket always crosses a
+  // bucket boundary, so comparing each bucket's last reading with the next bucket's first finds
+  // exactly the gaps readingGaps finds on raw rows, for any minimum over 15 minutes. Starts from
+  // the last bucket before the window so a gap straddling its left edge still shows up.
+  readingGapsRollup: `
+    WITH b AS (
+      SELECT bucket_ts, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts FROM readings_15m
+      WHERE bucket_ts >= COALESCE(
+        (SELECT MAX(bucket_ts) FROM readings_15m WHERE bucket_ts < (CAST(?1 AS INTEGER) / 900) * 900),
+        (CAST(?1 AS INTEGER) / 900) * 900)
+      GROUP BY bucket_ts
+    ), pairs AS (
+      SELECT LAG(last_ts) OVER (ORDER BY bucket_ts) AS from_ts, first_ts AS to_ts FROM b
+    )
+    SELECT from_ts, to_ts FROM pairs
+    WHERE from_ts IS NOT NULL AND to_ts - from_ts > ?2
+    ORDER BY from_ts`,
 
   // ?1 since, ?2 until (exclusive), epoch seconds.
-  readingsBetween: `
-    SELECT lot_id, lot_name, total, occupied, source_updated_ts
-    FROM readings
-    WHERE source_updated_ts >= ?1 AND source_updated_ts < ?2
-    ORDER BY source_updated_ts`,
+  rollupBetween: `
+    SELECT lot_id, lot_name, bucket_ts, occupied_sum, samples, total, first_ts, last_ts
+    FROM readings_15m
+    WHERE bucket_ts >= ?1 AND bucket_ts < ?2
+    ORDER BY bucket_ts, lot_id`,
 
   lastPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT 1',
 

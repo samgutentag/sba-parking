@@ -58,8 +58,8 @@ What I want built:</code></pre>
 
     <h2>How fresh is it</h2>
     <p>The airport publishes new counts about every 3 minutes, and this tracker checks every 5, so
-      <strong>data updates about every 5 minutes</strong>. Responses are also reused for up to 60
-      seconds (<code>latest</code>) or 5 minutes (<code>hourly</code>), so polling more than once a
+      <strong>data updates about every 5 minutes</strong>. Responses are also reused for up to 2
+      minutes (<code>latest</code>) or 5 minutes (<code>hourly</code>), so polling more than once a
       minute gets you nothing new. Please don't.</p>
 
     <h2 id="latest"><code>GET /latest</code></h2>
@@ -126,8 +126,9 @@ const shortTerm = lots.find((l) =&gt; l.lotId === '3')</code></pre>
 
     <h2>Errors</h2>
     <p>A bad <code>date</code> returns <code>400</code> with <code>{"error": "..."}</code>. An
-      unknown path returns <code>404</code>. Anything else is a <code>500</code>; try again in a
-      few minutes.</p>
+      unknown path returns <code>404</code>. A <code>503</code> means the database hit its daily
+      limit; data comes back after midnight UTC. Anything else is a <code>500</code>; try again in
+      a few minutes.</p>
 
     <h2>Stability</h2>
     <p>Fields in <code>v1</code> won't be renamed or removed, and their meaning won't change. New

@@ -10,6 +10,8 @@ export interface TypicalRawReading {
   total: number
   occupied: number
   source_updated_ts: number
+  /** How many readings this row stands for, when it's an average (a rollup bucket). Default 1. */
+  weight?: number
 }
 
 export interface TypicalCurve {
@@ -51,9 +53,9 @@ function finishCurve(acc: { sum: number[]; count: number[] }): TypicalCurve {
 
 // Arrays are always length 24 (one slot per hour-of-day); noUncheckedIndexedAccess just
 // can't see that invariant, so route every hour-bucket write through this one spot.
-function bump(sum: number[], count: number[], hour: number, value: number): void {
-  sum[hour] = (sum[hour] ?? 0) + value
-  count[hour] = (count[hour] ?? 0) + 1
+function bump(sum: number[], count: number[], hour: number, value: number, weight: number): void {
+  sum[hour] = (sum[hour] ?? 0) + value * weight
+  count[hour] = (count[hour] ?? 0) + weight
 }
 
 export function computeTypical(rows: TypicalRawReading[], timeZone: string): TypicalLot[] {
@@ -78,17 +80,18 @@ export function computeTypical(rows: TypicalRawReading[], timeZone: string): Typ
     // Percent, not raw occupied count: total capacity can change over time (see README),
     // so percent is the only value that's comparable across readings taken months apart.
     const percent = r.total > 0 ? Math.min(100, (r.occupied / r.total) * 100) : 0
+    const weight = r.weight ?? 1
     const { dateKey, hour, weekday } = localTimeParts(r.source_updated_ts, timeZone)
     lot.allDays.add(dateKey)
 
-    bump(lot.day.sum, lot.day.count, hour, percent)
+    bump(lot.day.sum, lot.day.count, hour, percent, weight)
 
     let dow = lot.dow.get(weekday)
     if (!dow) {
       dow = { sum: Array(24).fill(0), count: Array(24).fill(0), days: new Set() }
       lot.dow.set(weekday, dow)
     }
-    bump(dow.sum, dow.count, hour, percent)
+    bump(dow.sum, dow.count, hour, percent, weight)
     dow.days.add(dateKey)
   }
 
