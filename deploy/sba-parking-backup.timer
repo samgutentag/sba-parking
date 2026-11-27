@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly sba-parking D1 backup
+
+[Timer]
+# D1 pauses queries while an export runs, so do it when nobody is looking at parking.
+OnCalendar=*-*-* 03:15 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

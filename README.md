@@ -65,7 +65,7 @@ Polled every 15 minutes by default (`FLIGHTS_POLL_INTERVAL_MS`), independently o
 
 ## How it stores data
 
-Storage sits behind the `ParkingStore` interface in `src/store.ts`, which also owns the schema and every SQL statement. The Node backend is `src/sqlite-store.ts` (node:sqlite, a single file at `data/parking.db`, WAL mode). The planned Cloudflare Workers port adds a D1 backend behind the same interface and reuses the statements as written: the SQL is plain SQLite with positional `?N` parameters, and the schema has no pragmas.
+Storage sits behind the `ParkingStore` interface in `src/store.ts`, which also owns the schema and every SQL statement. The Node backend is `src/sqlite-store.ts` (node:sqlite, a single file at `data/parking.db`, WAL mode). The live site uses `src/d1-store.ts` (Cloudflare D1) behind the same interface, reusing the statements as written: the SQL is plain SQLite with positional `?N` parameters, and the schema has no pragmas.
 
 One row per lot per distinct feed update:
 
@@ -92,6 +92,8 @@ Flights are stored the same way, one row per distinct scheduled leg in a separat
 | `GET /api/flights?since=&until=` | flights in a window (epoch seconds; defaults to today's local calendar day), plus poller health and storage stats. Each flight carries `stale` (see below) and `lastSeenAt`. Backs the on-page flight board, not just diagnostics |
 | `GET /api/health` | 200 when the last poll is recent, 503 when polling is enabled but stale |
 
+On the live site every route sits under `/sba-parking/`, and the Worker reuses responses at the edge for a short time (`EDGE_TTL_SECONDS` in `src/worker.ts`: 60 s for `latest`, 120 s for `history` and `flights`, 300 s for `typical`), so a response can be that much older than the database. `health` is never cached.
+
 ## Web page
 
 Vanilla HTML, CSS, and JavaScript in `public/`, no framework, no build step. Refreshes itself every minute while visible. Light/dark follows the system. Lot colors are fixed by lot id so nothing ever recolors a series.
@@ -106,49 +108,48 @@ Two dashed reference-line toggles, "Typical day" (blended across all stored days
 
 **Footer.** A collapsed "About the data" disclosure (ADA-parking note, data sources, the flight-tracking caveat) instead of always-visible callout text, plus a site credit link.
 
-## Deploy on a Raspberry Pi
+## Live site: around805.com/sba-parking
 
-`deploy/sba-parking.service` is a systemd unit. Copy the repo to `/opt/sba-parking`, then:
+A Cloudflare Worker (`src/worker.ts`, config in `wrangler.toml`) with D1 for storage:
+
+| piece | how |
+|---|---|
+| page and API | `fetch` handler; strips `BASE_PATH` (`/sba-parking`), serves `public/` through the Static Assets binding, stamps asset hashes into `index.html` like the Node server does |
+| parking poller | Cron Trigger `*/5 * * * *` calling `pollOnce` |
+| flights poller | Cron Trigger `*/15 * * * *` calling `pollFlightsOnce` |
+| backoff | a cron can't reschedule itself, so after failures it skips ticks until the same exponential wait the Node pollers use has passed (`dueForPoll`) |
+| routing | route `around805.com/sba-parking*`. around805.com has a catch-all Redirect Rule to gutentag.world, and redirect rules run before Workers, so `/sba-parking` is listed in that rule's exceptions |
+
+The page references its assets and API relative to itself, so the same `public/` works at the root (the Pi) and under the prefix.
 
 ```sh
-sudo cp deploy/sba-parking.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sba-parking
-journalctl -u sba-parking -f
+pnpm worker:dev       # local Worker with a local D1; trigger crons at /__scheduled?cron=*/5+*+*+*+*
+pnpm worker:deploy
+pnpm exec wrangler secret put USER_AGENT   # contact address for the upstreams, kept out of the repo
+pnpm exec wrangler tail                    # live logs, including each cron poll
 ```
 
-Edit `Environment=` lines in the unit for `PORT`, `HOST`, `USER_AGENT`, and, if the defaults don't fit, `POLL_FLIGHTS`/`FLIGHTS_POLL_INTERVAL_MS`. The database is a single file; back it up by copying `data/parking.db` while the service runs (WAL mode makes this safe) or with `sqlite3 data/parking.db ".backup out.db"`.
+`USER_AGENT` reaches `config.ts` through `process.env`, which the `nodejs_compat` flag fills from vars and secrets.
 
-## Public URL: sba-parking.gutentag.world
+## Raspberry Pi: home-network backup viewer
 
-Served from the same Pi via its own Cloudflare Tunnel, kept completely separate from any other
-tunnel on that box (this Pi also runs a family call center, which must never be interrupted by
-changes here):
+The Pi no longer polls anything or serves the public. It keeps a nightly copy of D1 and runs the Node app against it, reachable only on the home network:
 
-- Tunnel name `sba-parking`, its own credentials file under `~/.cloudflared/`, its own config at
-  `/etc/cloudflared/sba-parking-config.yml` (ingress: `sba-parking.gutentag.world` → `http://localhost:3210`).
-- Its own systemd unit, `cloudflared-sba-parking.service`, running that config. Deliberately not
-  reusing the box's existing `cloudflared.service`: that one is the call center's tunnel, and
-  restarting it to pick up a config change would have interrupted it too, however briefly.
-- Redeploying code here: `cd /opt/sba-parking && git pull && sudo systemctl restart sba-parking`.
-  That only touches this app's own service, never the tunnel services or the call center.
-- Traffic: Cloudflare Web Analytics, enabled per-hostname in the Cloudflare dashboard
-  (Analytics & Logs → Web Analytics → Automatic setup). No code here, no tracking script in
-  the page; Cloudflare injects the beacon at the edge for this hostname only.
+- `deploy/sba-parking.service` runs the app; a drop-in at `/etc/systemd/system/sba-parking.service.d/lan-viewer.conf` sets `POLL=0`, `POLL_FLIGHTS=0` and `HOST=192.168.1.23` (the Pi's LAN address). The page is at `http://192.168.1.23:3210/`.
+- `deploy/backup-d1.sh`, run by `deploy/sba-parking-backup.timer` at 03:15 Pacific, exports D1 through its export API, rebuilds a SQLite file, keeps 14 nights in `data/backups/`, swaps the newest into `data/parking.db` and restarts the viewer. D1 pauses queries while an export runs, hence the hour.
+- Credentials live in `/etc/sba-parking-backup.env` (mode 600): `CLOUDFLARE_API_TOKEN` (Account > D1 > Edit only), `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID`.
 
-## Cloudflare Workers port (planned)
+```sh
+sudo cp deploy/sba-parking-backup.service deploy/sba-parking-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sba-parking-backup.timer
+sudo systemctl start sba-parking-backup.service   # run one now
+journalctl -u sba-parking-backup -n 20
+```
 
-The module boundaries map directly:
+This Pi also runs a family call center behind its own tunnel (`cloudflared.service`). Nothing here touches it. The old `sba-parking` tunnel and `sba-parking.gutentag.world` were retired on 2026-11-26.
 
-| today (Node) | on Workers |
-|---|---|
-| `sqlite-store.ts` | D1 backend implementing `ParkingStore` |
-| `server.ts` (node:http) | `fetch` handler; `public/` served by Static Assets |
-| `poller.ts` + `main.ts` (timer loop) | Cron Trigger `*/5 * * * *` calling `pollOnce` |
-| `flights-poller.ts` | second Cron Trigger `*/15 * * * *` calling `pollFlightsOnce` |
-| `source.ts`, `flights-source.ts`, `time.ts`, `status.ts`, `public/` | unchanged |
-
-Check first that Cloudflare egress can reach the `.gov` endpoint. If a WAF blocks it, the Pi keeps polling and posts readings to the Worker instead.
+The Node app still runs anywhere on its own (`pnpm start`) with polling on, if the Worker ever needs replacing.
 
 ## Upstream etiquette
 

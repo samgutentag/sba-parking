@@ -1,0 +1,12 @@
+[Unit]
+Description=Copy the sba-parking D1 database to the Pi
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+EnvironmentFile=/etc/sba-parking-backup.env
+ExecStart=/opt/sba-parking/deploy/backup-d1.sh
+# The viewer holds the old file open; restart it onto the fresh copy. '+' runs this as root.
+ExecStartPost=+/bin/systemctl restart sba-parking
