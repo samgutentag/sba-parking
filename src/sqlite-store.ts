@@ -20,6 +20,7 @@ import {
   type PollRow,
   type StoreStats,
   type TypicalRawRow,
+  type CacheRow,
 } from './store.ts'
 
 export class SqliteStore implements ParkingStore {
@@ -41,6 +42,8 @@ export class SqliteStore implements ParkingStore {
   #lastFlightPoll
   #recentFlightPolls
   #flightStats
+  #cacheGet
+  #cacheSet
 
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
@@ -65,6 +68,8 @@ export class SqliteStore implements ParkingStore {
     this.#lastFlightPoll = this.#db.prepare(SQL.lastFlightPoll)
     this.#recentFlightPolls = this.#db.prepare(SQL.recentFlightPolls)
     this.#flightStats = this.#db.prepare(SQL.flightStats)
+    this.#cacheGet = this.#db.prepare(SQL.cacheGet)
+    this.#cacheSet = this.#db.prepare(SQL.cacheSet)
   }
 
   async recordReadings(readings: LotReading[], nowIso: string): Promise<{ inserted: number; seen: number }> {
@@ -164,6 +169,14 @@ export class SqliteStore implements ParkingStore {
   async flightStats(): Promise<FlightStoreStats> {
     const dayAgo = new Date(Date.now() - 24 * 3600_000).toISOString()
     return this.#flightStats.get(dayAgo) as unknown as FlightStoreStats
+  }
+
+  async cacheGet(key: string): Promise<CacheRow | undefined> {
+    return this.#cacheGet.get(key) as unknown as CacheRow | undefined
+  }
+
+  async cacheSet(key: string, value: string, nowIso: string): Promise<void> {
+    this.#cacheSet.run(key, value, nowIso)
   }
 
   async close(): Promise<void> {

@@ -1,6 +1,6 @@
 // Cloudflare Worker entry: the same API and page as server.ts, plus the two pollers as Cron
 // Triggers instead of timer loops. Served under BASE_PATH (e.g. /sba-parking) on a zone route,
-// and also unprefixed so the workers.dev URL works for testing.
+// and also unprefixed, which is how `wrangler dev` serves it locally.
 
 import { handleApi, type ApiResult } from './api.ts'
 import { stampAssetUrls, VERSIONED_ASSETS } from './assets.ts'
@@ -21,19 +21,24 @@ interface Env {
 // the same schedule would be indistinguishable in controller.cron.
 const POLL_CRON = '*/5 * * * *'
 
-// How long each API response is reused at the edge before D1 is asked again. D1 bills by rows
-// scanned, and /api/typical and long /api/history ranges scan most of the table, so without
-// this every page view pays for a full scan. Each is short next to how stale the data already
+// How long each API response is reused at the edge before D1 is asked again. D1 bills every
+// row a query reads, and an open page refreshes every minute, so this is what keeps one idle
+// tab from spending the daily read allowance. Each is short next to how stale the data already
 // is: the airport refreshes about every 3 minutes and we poll every 5.
 const EDGE_TTL_SECONDS: Record<string, number> = {
-  '/api/latest': 60,
-  '/api/history': 120,
-  '/api/flights': 120,
+  '/api/latest': 120,
+  '/api/history': 300,
+  '/api/flights': 300,
   '/api/typical': 300,
-  '/api/v1/latest': 60,
+  '/api/v1/latest': 120,
   '/api/v1/hourly': 300,
-  '/api/usage': 60,
+  '/api/usage': 300,
 }
+
+// Cached copies are kept this long, well past their TTL, so that when D1 fails (an outage, or
+// a daily limit) the page gets the last good answer instead of a 500.
+const STALE_FALLBACK_SECONDS = 86400
+const CACHED_AT_HEADER = 'x-sba-cached-at'
 
 let store: D1Store | null = null
 let storeDb: D1Database | null = null
@@ -71,24 +76,38 @@ async function apiFor(env: Env, path: string, url: URL): Promise<ApiResult | nul
 
 async function serveApi(env: Env, path: string, url: URL, ctx: ExecutionContext): Promise<Response | null> {
   const ttl = EDGE_TTL_SECONDS[path]
+  if (!ttl) {
+    const api = await apiFor(env, path, url)
+    return api && json(api.status, api.body, api.headers)
+  }
   // The Cache API is a no-op on workers.dev, so caching only takes effect on the zone route.
   const cache = caches.default
   const cacheKey = new Request(url.toString(), { method: 'GET' })
-  if (ttl) {
-    const hit = await cache.match(cacheKey)
-    if (hit) {
-      const res = new Response(hit.body, hit)
-      res.headers.set('cache-control', 'no-store')
-      return res
-    }
+  const hit = await cache.match(cacheKey)
+  const fromCache = (res: Response, stale: boolean): Response => {
+    const out = new Response(res.body, res)
+    out.headers.set('cache-control', 'no-store')
+    out.headers.delete(CACHED_AT_HEADER)
+    if (stale) out.headers.set('x-sba-stale', '1')
+    return out
   }
-  const api = await apiFor(env, path, url)
+  if (hit && Date.now() - Number(hit.headers.get(CACHED_AT_HEADER)) < ttl * 1000) return fromCache(hit, false)
+
+  let api
+  try {
+    api = await apiFor(env, path, url)
+  } catch (err) {
+    if (!hit) throw err
+    console.error('serving stale after error', err)
+    return fromCache(hit, true)
+  }
   if (!api) return null
   const res = json(api.status, api.body, api.headers)
-  if (ttl && api.status === 200) {
+  if (api.status === 200) {
     const stored = res.clone()
     const headers = new Headers(stored.headers)
-    headers.set('cache-control', `public, max-age=${ttl}`)
+    headers.set('cache-control', `public, max-age=${STALE_FALLBACK_SECONDS}`)
+    headers.set(CACHED_AT_HEADER, String(Date.now()))
     ctx.waitUntil(cache.put(cacheKey, new Response(stored.body, { status: 200, headers })))
   }
   return res
@@ -124,7 +143,9 @@ async function serveStatic(env: Env, path: string, request: Request, url: URL): 
       headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' },
     })
   }
-  return env.ASSETS.fetch(new Request(new URL(`${path}${url.search}`, url.origin), request))
+  // Collapse leading slashes: new URL('//x', origin) would read "x" as a hostname.
+  const assetPath = path.replace(/^\/+/, '/')
+  return env.ASSETS.fetch(new Request(new URL(`${assetPath}${url.search}`, url.origin), request))
 }
 
 // Mirrors the Node pollers' backoff: after k consecutive failures, wait interval * 2^(k-1),

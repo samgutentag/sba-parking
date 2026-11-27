@@ -120,7 +120,16 @@ export interface ParkingStore {
   recentFlightPolls(limit: number): Promise<PollRow[]>
   flightStats(): Promise<FlightStoreStats>
 
+  /** Small computed values kept between requests (e.g. the typical-day baselines). */
+  cacheGet(key: string): Promise<CacheRow | undefined>
+  cacheSet(key: string, value: string, nowIso: string): Promise<void>
+
   close(): Promise<void>
+}
+
+export interface CacheRow {
+  value: string
+  updated_utc: string
 }
 
 /** Portable SQLite DDL. No pragmas here; those belong to the backend that supports them. */
@@ -182,9 +191,20 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     error TEXT
   )`,
   'CREATE INDEX IF NOT EXISTS flight_polls_ts ON flight_polls (ts_utc)',
+  `CREATE TABLE IF NOT EXISTS cache (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_utc TEXT NOT NULL
+  )`,
 ]
 
-/** Statements use positional `?N` parameters, which node:sqlite and D1 both accept. */
+/**
+ * Statements use positional `?N` parameters, which node:sqlite and D1 both accept.
+ *
+ * D1 bills every row a query reads, index entries included, so nothing that runs per page view
+ * may scan a whole table: counts come from MAX(id) (ids are never deleted, so it equals the row
+ * count) and time windows go through the timestamp indexes.
+ */
 export const SQL = {
   // Dedupe on (lot, source_updated): an identical reading only bumps last_seen_utc,
   // so the table reflects the source's real refresh cadence rather than ours.
@@ -197,12 +217,13 @@ export const SQL = {
 
   insertPoll: 'INSERT INTO polls (ts_utc, ok, http_status, new_rows, error) VALUES (?1, ?2, ?3, ?4, ?5)',
 
+  // Every lot shares the feed's one timestamp, so the newest readings are the rows at the
+  // newest timestamp: an index lookup instead of a per-lot MAX over the whole table.
   latest: `
-    SELECT r.lot_id, r.lot_name, r.total, r.occupied, r.source_updated, r.source_updated_ts, r.first_seen_utc, r.last_seen_utc
-    FROM readings r
-    JOIN (SELECT lot_id, MAX(source_updated_ts) AS ts FROM readings GROUP BY lot_id) m
-      ON m.lot_id = r.lot_id AND m.ts = r.source_updated_ts
-    ORDER BY r.lot_id`,
+    SELECT lot_id, lot_name, total, occupied, source_updated, source_updated_ts, first_seen_utc, last_seen_utc
+    FROM readings
+    WHERE source_updated_ts = (SELECT MAX(source_updated_ts) FROM readings)
+    ORDER BY lot_id`,
 
   // ?1 bucket seconds, ?2 since epoch seconds. Explicit CASTs keep the division integer
   // even when the driver binds numbers as REAL.
@@ -212,7 +233,7 @@ export const SQL = {
            CAST(ROUND(AVG(occupied)) AS INTEGER) AS occupied,
            MAX(total) AS total,
            COUNT(*) AS samples
-    FROM readings
+    FROM readings INDEXED BY readings_ts
     WHERE source_updated_ts >= ?2
     GROUP BY lot_id, bucket_ts
     ORDER BY bucket_ts, lot_id`,
@@ -258,10 +279,10 @@ export const SQL = {
 
   // ?1 ISO timestamp 24 hours ago.
   stats: `
-    SELECT (SELECT COUNT(*) FROM readings) AS readings,
+    SELECT (SELECT COALESCE(MAX(id), 0) FROM readings) AS readings,
            (SELECT MIN(source_updated_ts) FROM readings) AS earliest_ts,
            (SELECT MAX(source_updated_ts) FROM readings) AS latest_ts,
-           (SELECT COUNT(*) FROM polls) AS polls,
+           (SELECT COALESCE(MAX(id), 0) FROM polls) AS polls,
            (SELECT COUNT(*) FROM polls WHERE ok = 0 AND ts_utc >= ?1) AS failed_polls_24h`,
 
   // Dedupe on (type, rec, flight_date): an unchanged flight only bumps last_seen_utc, same
@@ -294,9 +315,15 @@ export const SQL = {
 
   // ?1 ISO timestamp 24 hours ago.
   flightStats: `
-    SELECT (SELECT COUNT(*) FROM flights) AS flights,
+    SELECT (SELECT COALESCE(MAX(id), 0) FROM flights) AS flights,
            (SELECT MIN(scheduled_ts) FROM flights) AS earliest_ts,
            (SELECT MAX(scheduled_ts) FROM flights) AS latest_ts,
-           (SELECT COUNT(*) FROM flight_polls) AS polls,
+           (SELECT COALESCE(MAX(id), 0) FROM flight_polls) AS polls,
            (SELECT COUNT(*) FROM flight_polls WHERE ok = 0 AND ts_utc >= ?1) AS failed_polls_24h`,
+
+  cacheGet: 'SELECT value, updated_utc FROM cache WHERE key = ?1',
+
+  cacheSet: `
+    INSERT INTO cache (key, value, updated_utc) VALUES (?1, ?2, ?3)
+    ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_utc = excluded.updated_utc`,
 } as const

@@ -31,20 +31,35 @@ const MIN_DAYS_FOR_DAY_OF_WEEK = 3
 // Below this many distinct days of *any* history, a lot's "typical for this hour" is really
 // just "what happened once," so /api/latest falls back to the fixed-percent status instead.
 const MIN_DAYS_FOR_TYPICAL_STATUS = 3
-// Recomputing this is a full scan of up to 90 days of readings; cache it briefly so several
-// clients (or one client's 30-minute refresh) don't each pay for it on every request. Shared
-// by /api/typical and /api/latest so the latter doesn't pay for a second scan on every poll.
-const TYPICAL_CACHE_MS = 5 * 60_000
-let typicalCache: { at: number; sinceAt: string; untilAt: string; lots: TypicalLot[] } | null = null
+// Recomputing this reads up to 90 days of readings, which on D1 is billed row by row, so the
+// result is kept in the store's cache table and rebuilt at most every TYPICAL_STORE_MS. A
+// shorter in-memory copy saves even that one-row read for back-to-back requests. Shared by
+// /api/typical and /api/latest. The baselines move slowly; hours-old is fine.
+const TYPICAL_MEMORY_MS = 5 * 60_000
+const TYPICAL_STORE_MS = 6 * 3600_000
+type TypicalSnapshot = { sinceAt: string; untilAt: string; lots: TypicalLot[] }
+let typicalCache: { at: number; snapshot: TypicalSnapshot } | null = null
 
-async function getTypicalLots(db: ParkingStore): Promise<{ sinceAt: string; untilAt: string; lots: TypicalLot[] }> {
-  if (typicalCache && Date.now() - typicalCache.at < TYPICAL_CACHE_MS) return typicalCache
+async function getTypicalLots(db: ParkingStore): Promise<TypicalSnapshot> {
+  if (typicalCache && Date.now() - typicalCache.at < TYPICAL_MEMORY_MS) return typicalCache.snapshot
+  const stored = await db.cacheGet('typical')
+  if (stored && Date.now() - Date.parse(stored.updated_utc) < TYPICAL_STORE_MS) {
+    const snapshot = JSON.parse(stored.value) as TypicalSnapshot
+    typicalCache = { at: Date.now(), snapshot }
+    return snapshot
+  }
   const now = Math.floor(Date.now() / 1000)
   const sinceTs = Math.max(0, now - TYPICAL_WINDOW_SECONDS)
   const rows = await db.typicalRaw(sinceTs)
-  const lots = computeTypical(rows, config.sourceTimeZone)
-  typicalCache = { at: Date.now(), sinceAt: isoFromEpochSeconds(sinceTs), untilAt: isoFromEpochSeconds(now), lots }
-  return typicalCache
+  const snapshot: TypicalSnapshot = {
+    sinceAt: isoFromEpochSeconds(sinceTs),
+    untilAt: isoFromEpochSeconds(now),
+    lots: computeTypical(rows, config.sourceTimeZone),
+  }
+  // A failed write (say, D1's daily write limit) shouldn't fail the request that computed it.
+  await db.cacheSet('typical', JSON.stringify(snapshot), new Date().toISOString()).catch((err) => console.error('typical cache write failed', err))
+  typicalCache = { at: Date.now(), snapshot }
+  return snapshot
 }
 
 // The airport says it refreshes roughly every 3 minutes, so 30 minutes without its timestamp

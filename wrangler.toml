@@ -3,7 +3,8 @@ main = "src/worker.ts"
 compatibility_date = "2026-11-01"
 # Only for process.env, so config.ts reads [vars] the same way it reads env vars on the Pi.
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+# Off: workers.dev skips the edge cache, so every request there would read D1 directly.
+workers_dev = false
 # The path pattern also matches /sba-parking itself, which the Worker redirects to /sba-parking/.
 routes = [{ pattern = "around805.com/sba-parking*", zone_name = "around805.com" }]
 

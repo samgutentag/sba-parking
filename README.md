@@ -129,6 +129,8 @@ A Cloudflare Worker (`src/worker.ts`, config in `wrangler.toml`) with D1 for sto
 | backoff | a cron can't reschedule itself, so after failures it skips ticks until the same exponential wait the Node pollers use has passed (`dueForPoll`) |
 | routing | route `around805.com/sba-parking*`. around805.com has a catch-all Redirect Rule to gutentag.world, and redirect rules run before Workers, so `/sba-parking` is listed in that rule's exceptions |
 
+**D1 budget.** The free plan allows 5M rows read and 100k rows written per day, account-wide, and D1 counts every row a query touches, index entries included. On 2026-11-27 one open tab (refreshing every minute) used up the read allowance in under an hour, because `latest`, `stats` and `history` each scanned the whole readings table. Now: per-request queries only use index lookups (`latest` reads the rows at the newest timestamp, counts come from `MAX(id)`, `history` is forced onto `readings_ts`), the 90-day typical-day baselines are stored in a `cache` table and rebuilt at most every 6 hours, API responses are edge-cached for 2 to 5 minutes, and a cached copy is kept for a day so a D1 failure serves the last good answer instead of a 500. `workers_dev` is off because workers.dev bypasses the edge cache. The one-time history import (293k row writes) used up the write allowance the same day.
+
 The page references its assets and API relative to itself, so the same `public/` works at the root (the Pi) and under the prefix.
 
 ```sh

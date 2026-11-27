@@ -18,6 +18,7 @@ import {
   type PollRow,
   type StoreStats,
   type TypicalRawRow,
+  type CacheRow,
 } from './store.ts'
 
 export class D1Store implements ParkingStore {
@@ -29,15 +30,13 @@ export class D1Store implements ParkingStore {
   }
 
   // CREATE ... IF NOT EXISTS is a no-op once the tables exist, so this runs once per isolate
-  // rather than needing a separate migration step. Reset on failure so a transient D1 error
-  // doesn't wedge the isolate.
+  // rather than needing a separate migration step. A failure is logged, not thrown: the tables
+  // almost always exist already, and a schema batch refused by a D1 limit mustn't take every
+  // read down with it. If a table really is missing, the query itself fails with a clear error.
   #init(): Promise<unknown> {
     this.#ready ??= this.#db
       .batch(SCHEMA_STATEMENTS.map((s) => this.#db.prepare(s)))
-      .catch((err) => {
-        this.#ready = null
-        throw err
-      })
+      .catch((err) => console.error('schema check failed; continuing', err))
     return this.#ready
   }
 
@@ -151,6 +150,14 @@ export class D1Store implements ParkingStore {
     const row = await this.#first<FlightStoreStats>(SQL.flightStats, dayAgo)
     if (!row) throw new Error('flightStats query returned no row')
     return row
+  }
+
+  cacheGet(key: string): Promise<CacheRow | undefined> {
+    return this.#first<CacheRow>(SQL.cacheGet, key)
+  }
+
+  async cacheSet(key: string, value: string, nowIso: string): Promise<void> {
+    await this.#run(SQL.cacheSet, key, value, nowIso)
   }
 
   async close(): Promise<void> {}
