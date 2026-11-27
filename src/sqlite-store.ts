@@ -29,6 +29,7 @@ export class SqliteStore implements ParkingStore {
   #latest
   #history
   #typicalRaw
+  #readingsBetween
   #lastPoll
   #recentPolls
   #stats
@@ -52,6 +53,7 @@ export class SqliteStore implements ParkingStore {
     this.#latest = this.#db.prepare(SQL.latest)
     this.#history = this.#db.prepare(SQL.history)
     this.#typicalRaw = this.#db.prepare(SQL.typicalRaw)
+    this.#readingsBetween = this.#db.prepare(SQL.readingsBetween)
     this.#lastPoll = this.#db.prepare(SQL.lastPoll)
     this.#recentPolls = this.#db.prepare(SQL.recentPolls)
     this.#stats = this.#db.prepare(SQL.stats)
@@ -97,6 +99,10 @@ export class SqliteStore implements ParkingStore {
 
   async typicalRaw(sinceTs: number): Promise<TypicalRawRow[]> {
     return this.#typicalRaw.all(sinceTs) as unknown as TypicalRawRow[]
+  }
+
+  async readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]> {
+    return this.#readingsBetween.all(sinceTs, untilTs) as unknown as TypicalRawRow[]
   }
 
   async lastPoll(): Promise<PollRow | undefined> {

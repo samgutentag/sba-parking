@@ -29,6 +29,8 @@ const EDGE_TTL_SECONDS: Record<string, number> = {
   '/api/history': 120,
   '/api/flights': 120,
   '/api/typical': 300,
+  '/api/v1/latest': 60,
+  '/api/v1/hourly': 300,
 }
 
 let store: D1Store | null = null
@@ -41,10 +43,10 @@ function storeFor(env: Env): D1Store {
   return store
 }
 
-function json(status: number, body: unknown): Response {
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    headers: { ...headers, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   })
 }
 
@@ -74,7 +76,7 @@ async function serveApi(db: D1Store, path: string, url: URL, ctx: ExecutionConte
   }
   const api = await handleApi(db, path, url)
   if (!api) return null
-  const res = json(api.status, api.body)
+  const res = json(api.status, api.body, api.headers)
   if (ttl && api.status === 200) {
     const stored = res.clone()
     const headers = new Headers(stored.headers)
@@ -93,7 +95,7 @@ async function sha256Prefix(res: Response): Promise<string> {
 
 // Same stamping as server.ts, built once per isolate. A deploy always starts fresh isolates.
 async function buildIndexHtml(env: Env, origin: string): Promise<string> {
-  const page = await env.ASSETS.fetch(new URL('/', origin))
+  const page = await env.ASSETS.fetch(new URL('/index.html', origin))
   if (!page.ok) throw new Error(`index.html -> HTTP ${page.status}`)
   const hashes: Record<string, string> = {}
   for (const asset of VERSIONED_ASSETS) {

@@ -1,6 +1,7 @@
 // Route handling shared by the Node server (server.ts) and the Cloudflare Worker (worker.ts).
 // No node: imports here: each runtime turns the returned status and body into its own response.
 
+import { v1Hourly, v1Latest, V1BadRequest } from './api-v1.ts'
 import { config } from './config.ts'
 import type { ParkingStore } from './store.ts'
 import { relativeStatusFor, statusFor } from './status.ts'
@@ -274,11 +275,28 @@ async function flightsPayload(db: ParkingStore, url: URL) {
 export interface ApiResult {
   status: number
   body: unknown
+  headers?: Record<string, string>
+}
+
+// The v1 API is public and read-only, so any site's browser JavaScript may call it. The page's
+// own routes stay same-origin.
+const V1_HEADERS = { 'access-control-allow-origin': '*' }
+
+async function handleV1(db: ParkingStore, pathname: string, url: URL): Promise<ApiResult> {
+  try {
+    if (pathname === '/api/v1/latest') return { status: 200, body: await v1Latest(db), headers: V1_HEADERS }
+    if (pathname === '/api/v1/hourly') return { status: 200, body: await v1Hourly(db, url.searchParams.get('date')), headers: V1_HEADERS }
+    return { status: 404, body: { error: 'not found' }, headers: V1_HEADERS }
+  } catch (err) {
+    if (err instanceof V1BadRequest) return { status: 400, body: { error: err.message }, headers: V1_HEADERS }
+    throw err
+  }
 }
 
 /** Answers an `/api/*` path, or returns null for anything else. `pathname` has any base path already stripped. */
 export async function handleApi(db: ParkingStore, pathname: string, url: URL): Promise<ApiResult | null> {
   if (!pathname.startsWith('/api/')) return null
+  if (pathname.startsWith('/api/v1/')) return handleV1(db, pathname, url)
   try {
     if (pathname === '/api/latest') return { status: 200, body: await latestPayload(db) }
     if (pathname === '/api/history') return { status: 200, body: await historyPayload(db, url) }

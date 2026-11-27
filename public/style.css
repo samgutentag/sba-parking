@@ -293,3 +293,21 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
   .controls, .tooltip { display: none !important; }
   .card, .tile { break-inside: avoid; box-shadow: none; }
 }
+
+/* API docs page (api.html): reading width, code blocks that scroll instead of widening the page. */
+.docs { max-width: 760px; }
+.docs main > p, .docs main > h2 { margin: 0 0 12px; }
+.docs main > h2 { margin-top: 28px; }
+.docs code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.docs pre {
+  background: var(--wash); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin: 0 0 16px; overflow-x: auto;
+}
+.docs .table-wrap { overflow-x: auto; margin: 0 0 16px; }
+.docs table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.docs th, .docs td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--grid); }
+.docs th { color: var(--ink-2); font-weight: 600; }
+.docs th, .docs td { white-space: normal; background: none; }
+.docs td:first-child { white-space: nowrap; }
+.docs h2 code { font-size: inherit; font-weight: 600; }
+.data-link { margin: 14px 0 0; font-size: 13px; text-align: center; }

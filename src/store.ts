@@ -101,6 +101,8 @@ export interface ParkingStore {
   history(sinceTs: number, bucketSeconds: number): Promise<HistoryRow[]>
   /** Raw readings since `sinceTs`, for bucketing into typical-day / typical-day-of-week baselines. */
   typicalRaw(sinceTs: number): Promise<TypicalRawRow[]>
+  /** Raw readings in [sinceTs, untilTs), for the public hourly endpoint. */
+  readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]>
   lastPoll(): Promise<PollRow | undefined>
   /** Newest first. The Worker reads these to back off on failure, since its cron can't reschedule itself. */
   recentPolls(limit: number): Promise<PollRow[]>
@@ -222,6 +224,13 @@ export const SQL = {
     SELECT lot_id, lot_name, total, occupied, source_updated_ts
     FROM readings
     WHERE source_updated_ts >= ?1
+    ORDER BY source_updated_ts`,
+
+  // ?1 since, ?2 until (exclusive), epoch seconds.
+  readingsBetween: `
+    SELECT lot_id, lot_name, total, occupied, source_updated_ts
+    FROM readings
+    WHERE source_updated_ts >= ?1 AND source_updated_ts < ?2
     ORDER BY source_updated_ts`,
 
   lastPoll: 'SELECT ts_utc, ok, http_status, new_rows, error FROM polls ORDER BY id DESC LIMIT 1',

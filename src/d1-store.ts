@@ -91,6 +91,10 @@ export class D1Store implements ParkingStore {
     return this.#all<TypicalRawRow>(SQL.typicalRaw, sinceTs)
   }
 
+  readingsBetween(sinceTs: number, untilTs: number): Promise<TypicalRawRow[]> {
+    return this.#all<TypicalRawRow>(SQL.readingsBetween, sinceTs, untilTs)
+  }
+
   lastPoll(): Promise<PollRow | undefined> {
     return this.#first<PollRow>(SQL.lastPoll)
   }

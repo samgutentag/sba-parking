@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>SBA Parking API</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-weight='700' font-size='20' text-anchor='middle' fill='white'%3EP%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="docs">
+  <header class="page-head">
+    <div>
+      <h1>SBA Parking API</h1>
+      <p class="sub"><a href="./">&larr; Back to the parking page</a></p>
+    </div>
+  </header>
+
+  <main>
+    <p>Open-space counts for Santa Barbara Airport's three public lots, as plain JSON. No key, no
+      sign-up. Every response is a flat list of flat rows.</p>
+
+    <p>Base URL: <code>https://around805.com/sba-parking/api/v1/</code></p>
+
+    <h2>How fresh is it</h2>
+    <p>The airport publishes new counts about every 3 minutes, and this tracker checks every 5, so
+      <strong>data updates about every 5 minutes</strong>. Responses are also reused for up to 60
+      seconds (<code>latest</code>) or 5 minutes (<code>hourly</code>), so polling more than once a
+      minute gets you nothing new. Please don't.</p>
+
+    <h2 id="latest"><code>GET /latest</code></h2>
+    <p>Current count for each lot. One row per lot.</p>
+    <pre><code>[
+  {"lotId": "2", "lot": "Economy", "total": 564, "open": 68, "percentFull": 88, "status": "Limited", "updatedAt": "2026-11-27T07:03:00Z"},
+  {"lotId": "3", "lot": "Short-term", "total": 192, "open": 11, "percentFull": 94, "status": "Limited", "updatedAt": "2026-11-27T07:03:00Z"},
+  {"lotId": "4", "lot": "Long-term", "total": 780, "open": 28, "percentFull": 96, "status": "Limited", "updatedAt": "2026-11-27T07:03:00Z"}
+]</code></pre>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>lotId</code></td><td>string</td><td>The airport's own lot ID. Use this as the key; it stays put if a lot is renamed.</td></tr>
+          <tr><td><code>lot</code></td><td>string</td><td>Short lot name: <code>Economy</code>, <code>Short-term</code>, <code>Long-term</code>.</td></tr>
+          <tr><td><code>total</code></td><td>number</td><td>Spaces in the lot, excluding ADA spaces.</td></tr>
+          <tr><td><code>open</code></td><td>number</td><td>Spaces free right now.</td></tr>
+          <tr><td><code>percentFull</code></td><td>number</td><td>0 to 100, whole number.</td></tr>
+          <tr><td><code>status</code></td><td>string</td><td><code>Open</code> (under 75% full), <code>Limited</code> (75 to 99%), <code>Full</code> (100%). Same thresholds as the airport's site.</td></tr>
+          <tr><td><code>updatedAt</code></td><td>string</td><td>When the airport published this count, ISO 8601 in UTC.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="hourly"><code>GET /hourly?date=YYYY-MM-DD</code></h2>
+    <p>One row per lot per hour for one day, averaged over that hour. <code>date</code> is a Pacific
+      calendar day and defaults to today. Hours run 0 to 23 in Pacific time. A day is always 72 rows
+      (24 hours &times; 3 lots), including hours that haven't happened yet.</p>
+    <pre><code>[
+  {"date": "2026-11-26", "hour": 0, "lotId": "2", "lot": "Economy", "total": 564, "open": null, "percentFull": null},
+  {"date": "2026-11-26", "hour": 0, "lotId": "3", "lot": "Short-term", "total": 192, "open": null, "percentFull": null},
+  ...
+  {"date": "2026-11-26", "hour": 23, "lotId": "3", "lot": "Short-term", "total": 192, "open": 11, "percentFull": 94}
+]</code></pre>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>date</code></td><td>string</td><td>The Pacific calendar day asked for.</td></tr>
+          <tr><td><code>hour</code></td><td>number</td><td>0 to 23, Pacific.</td></tr>
+          <tr><td><code>lotId</code>, <code>lot</code>, <code>total</code></td><td></td><td>Same as <code>/latest</code>.</td></tr>
+          <tr><td><code>open</code></td><td>number or null</td><td>Average free spaces that hour.</td></tr>
+          <tr><td><code>percentFull</code></td><td>number or null</td><td>Average percent full that hour.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong><code>null</code> means no fresh count that hour</strong>: it hasn't happened yet, the
+      airport paused its feed (it sometimes stops publishing overnight or for days at a time), or the
+      tracker wasn't running. A null is never filled in with a guess. History starts 2026-09-09.</p>
+
+    <h2>Examples</h2>
+    <pre><code>curl https://around805.com/sba-parking/api/v1/latest
+
+curl 'https://around805.com/sba-parking/api/v1/hourly?date=2026-11-20'</code></pre>
+    <pre><code>const res = await fetch('https://around805.com/sba-parking/api/v1/latest')
+if (!res.ok) throw new Error(`HTTP ${res.status}`)
+const lots = await res.json()
+const shortTerm = lots.find((l) =&gt; l.lotId === '3')</code></pre>
+    <p>Browser JavaScript on any site can call these directly; responses carry
+      <code>Access-Control-Allow-Origin: *</code>.</p>
+
+    <h2>Errors</h2>
+    <p>A bad <code>date</code> returns <code>400</code> with <code>{"error": "..."}</code>. An
+      unknown path returns <code>404</code>. Anything else is a <code>500</code>; try again in a
+      few minutes.</p>
+
+    <h2>Stability</h2>
+    <p>Fields in <code>v1</code> won't be renamed or removed, and their meaning won't change. New
+      fields may be added, so ignore ones you don't know. Anything breaking would ship as
+      <code>v2</code> alongside this one. The page's own <code>/api/</code> routes (without
+      <code>v1</code>) are internal and change without notice.</p>
+
+    <h2>Where it comes from</h2>
+    <p>Counts come from the airport's own feed at
+      <a href="https://flysba.santabarbaraca.gov/airport/parking">flysba.santabarbaraca.gov</a>.
+      This is an independent tracker, not an airport service.</p>
+  </main>
+
+  <footer class="page-foot">
+    <p class="built-by">Built on a ✈️ by <a href="https://gutentag.world/?utm_source=sba-parking" target="_blank" rel="noopener noreferrer">Sam Gutentag</a></p>
+  </footer>
+</body>
+</html>

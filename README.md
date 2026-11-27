@@ -84,6 +84,10 @@ Flights are stored the same way, one row per distinct scheduled leg in a separat
 
 ## API
 
+The public, versioned API is `/api/v1/latest` and `/api/v1/hourly?date=YYYY-MM-DD` (`src/api-v1.ts`), documented for outside readers at `public/api.html` and linked from the page footer as "Access the data". Those field names are a contract: add fields, never rename or remove them; breaking changes go in a `v2`. `v1` responses carry `Access-Control-Allow-Origin: *`.
+
+The routes below are the page's own and change with it:
+
 | route | returns |
 |---|---|
 | `GET /api/latest` | newest reading per lot with free count, percent, status label (`statusBasis`/`typicalPercent`/`deviationPp` when typical-relative) and `stale` (no new airport timestamp in 30 min), plus `feed` (`stale`, `cause`), poller health and history stats |

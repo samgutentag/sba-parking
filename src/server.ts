@@ -19,9 +19,10 @@ const MIME: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 }
 
-function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+function sendJson(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   const text = JSON.stringify(body)
   res.writeHead(status, {
+    ...headers,
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'content-length': Buffer.byteLength(text),
@@ -89,7 +90,7 @@ export function createServer(db: ParkingStore): http.Server {
         return
       }
       const api = await handleApi(db, url.pathname, url)
-      if (api) return sendJson(res, api.status, api.body)
+      if (api) return sendJson(res, api.status, api.body, api.headers)
       await serveStatic(url.pathname, res)
     } catch (err) {
       console.error(err)
