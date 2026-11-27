@@ -19,6 +19,8 @@ Configuration is by environment variable. See `.env.example`. Set `USER_AGENT` t
 
 ## Data source
 
+> **Want the data? Use the public API, not the airport's feed.** `https://around805.com/sba-parking/api/v1/latest` and `/hourly` serve the same counts plus history, with no key, from cache. Docs: [around805.com/sba-parking/api.html](https://around805.com/sba-parking/api.html). The airport route below is undocumented and run by a small `.gov` site; one poller is plenty.
+
 `GET https://flysba.santabarbaraca.gov/citizen-parking-data/latest`
 
 No auth, no key. Returns one object per lot:
@@ -142,7 +144,7 @@ pnpm exec wrangler tail                    # live logs, including each cron poll
 
 The Pi no longer polls anything or serves the public. It keeps a nightly copy of D1 and runs the Node app against it, reachable only on the home network:
 
-- `deploy/sba-parking.service` runs the app; a drop-in at `/etc/systemd/system/sba-parking.service.d/lan-viewer.conf` sets `POLL=0`, `POLL_FLIGHTS=0` and `HOST=192.168.1.23` (the Pi's LAN address). The page is at `http://192.168.1.23:3210/`.
+- `deploy/sba-parking.service` runs the app; a drop-in at `/etc/systemd/system/sba-parking.service.d/lan-viewer.conf` sets `POLL=0`, `POLL_FLIGHTS=0` and `HOST` to the Pi's LAN address, so the page is reachable on the home network only.
 - `deploy/backup-d1.sh`, run by `deploy/sba-parking-backup.timer` at 03:15 Pacific, exports D1 through its export API, rebuilds a SQLite file, keeps 14 nights in `data/backups/`, swaps the newest into `data/parking.db` and restarts the viewer. D1 pauses queries while an export runs, hence the hour.
 - Credentials live in `/etc/sba-parking-backup.env` (mode 600): `CLOUDFLARE_API_TOKEN` (Account > D1 > Edit only), `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID`.
 
@@ -154,7 +156,7 @@ sudo systemctl start sba-parking-backup.service   # run one now
 journalctl -u sba-parking-backup -n 20
 ```
 
-This Pi also runs a family call center behind its own tunnel (`cloudflared.service`). Nothing here touches it. The old `sba-parking` tunnel and `sba-parking.gutentag.world` were retired on 2026-11-26.
+The Pi runs other services too; nothing here touches them. The old Cloudflare Tunnel and `sba-parking.gutentag.world` were retired on 2026-11-26.
 
 The Node app still runs anywhere on its own (`pnpm start`) with polling on, if the Worker ever needs replacing.
 
@@ -163,4 +165,5 @@ The Node app still runs anywhere on its own (`pnpm start`) with polling on, if t
 - One poll every 5 minutes for each feed, one process each. Never poll per page view; the page reads the local database.
 - Descriptive `User-Agent` with a contact address, sent to both upstreams.
 - Serve stale data on error rather than retrying hard.
+- Other people and services should read the public API rather than run their own poller against the airport.
 - Airport parking office, if a heads-up ever seems warranted: (805) 967-2745, Reimagined Parking.
