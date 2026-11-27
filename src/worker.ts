@@ -2,13 +2,14 @@
 // Triggers instead of timer loops. Served under BASE_PATH (e.g. /sba-parking) on a zone route,
 // and also unprefixed so the workers.dev URL works for testing.
 
-import { handleApi } from './api.ts'
+import { handleApi, type ApiResult } from './api.ts'
 import { stampAssetUrls, VERSIONED_ASSETS } from './assets.ts'
 import { config } from './config.ts'
 import { D1Store } from './d1-store.ts'
 import { pollFlightsOnce } from './flights-poller.ts'
 import { pollOnce } from './poller.ts'
 import type { PollRow } from './store.ts'
+import { recordUsage, usageKeyFor, usageSummary } from './usage.ts'
 
 interface Env {
   DB: D1Database
@@ -31,6 +32,7 @@ const EDGE_TTL_SECONDS: Record<string, number> = {
   '/api/typical': 300,
   '/api/v1/latest': 60,
   '/api/v1/hourly': 300,
+  '/api/usage': 60,
 }
 
 let store: D1Store | null = null
@@ -61,7 +63,13 @@ function routePath(url: URL, basePath: string): string | Response {
   return url.pathname
 }
 
-async function serveApi(db: D1Store, path: string, url: URL, ctx: ExecutionContext): Promise<Response | null> {
+// The docs page's usage counter. Internal, like the page's other unversioned routes.
+async function apiFor(env: Env, path: string, url: URL): Promise<ApiResult | null> {
+  if (path === '/api/usage') return { status: 200, body: await usageSummary(env.DB) }
+  return handleApi(storeFor(env), path, url)
+}
+
+async function serveApi(env: Env, path: string, url: URL, ctx: ExecutionContext): Promise<Response | null> {
   const ttl = EDGE_TTL_SECONDS[path]
   // The Cache API is a no-op on workers.dev, so caching only takes effect on the zone route.
   const cache = caches.default
@@ -74,7 +82,7 @@ async function serveApi(db: D1Store, path: string, url: URL, ctx: ExecutionConte
       return res
     }
   }
-  const api = await handleApi(db, path, url)
+  const api = await apiFor(env, path, url)
   if (!api) return null
   const res = json(api.status, api.body, api.headers)
   if (ttl && api.status === 200) {
@@ -170,8 +178,10 @@ export default {
     const url = new URL(request.url)
     const path = routePath(url, env.BASE_PATH ?? '')
     if (path instanceof Response) return path
+    const usageKey = request.method === 'GET' ? usageKeyFor(path) : null
+    if (usageKey) recordUsage(env.DB, usageKey, ctx)
     try {
-      const api = await serveApi(storeFor(env), path, url, ctx)
+      const api = await serveApi(env, path, url, ctx)
       if (api) return api
       return await serveStatic(env, path, request, url)
     } catch (err) {

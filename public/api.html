@@ -22,6 +22,40 @@
 
     <p>Base URL: <code>https://around805.com/sba-parking/api/v1/</code></p>
 
+    <p class="usage" id="usage" hidden></p>
+
+    <section class="agents" aria-labelledby="agents-title">
+      <div class="agents-head">
+        <h2 id="agents-title">For agents</h2>
+        <button type="button" id="copy-prompt">Copy prompt</button>
+      </div>
+      <p>Paste this into Claude, Cursor, or any coding agent, then say what you want built.</p>
+      <pre id="agent-prompt"><code>You're building something that reads the SBA Parking API: live open-space counts for Santa Barbara Airport's three public parking lots. Full docs: https://around805.com/sba-parking/api.html
+
+Endpoints (no key, CORS open, JSON):
+
+GET https://around805.com/sba-parking/api/v1/latest
+  Array, one row per lot:
+  lotId (string, stable key), lot (short name), total (number), open (number),
+  percentFull (0-100), status ("Open" | "Limited" | "Full"),
+  updatedAt (ISO 8601 UTC, when the airport published it)
+
+GET https://around805.com/sba-parking/api/v1/hourly?date=YYYY-MM-DD
+  Array of 72 rows, 24 Pacific hours x 3 lots, hourly averages:
+  date, hour (0-23 Pacific), lotId, lot, total,
+  open (number or null), percentFull (number or null)
+  date defaults to today in Pacific time. History starts 2026-09-09.
+
+Rules:
+- Key lots by lotId, not by name.
+- null means no fresh count that hour (future hour, or the airport's feed paused). Show it as missing. Never fill it in.
+- Data changes about every 5 minutes. Poll /latest at most once a minute.
+- On a non-200 response, keep showing the last good data and retry later.
+- Times in /hourly are Pacific; updatedAt is UTC.
+
+What I want built:</code></pre>
+    </section>
+
     <h2>How fresh is it</h2>
     <p>The airport publishes new counts about every 3 minutes, and this tracker checks every 5, so
       <strong>data updates about every 5 minutes</strong>. Responses are also reused for up to 60
@@ -106,6 +140,37 @@ const shortTerm = lots.find((l) =&gt; l.lotId === '3')</code></pre>
       <a href="https://flysba.santabarbaraca.gov/airport/parking">flysba.santabarbaraca.gov</a>.
       This is an independent tracker, not an airport service.</p>
   </main>
+
+  <script>
+    // Copy button for the agent prompt, and the usage counter. Both are extras: the page reads
+    // fine if either fails, so errors just leave them hidden.
+    const copyButton = document.getElementById('copy-prompt')
+    copyButton.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(document.getElementById('agent-prompt').innerText.trim() + ' ')
+        copyButton.textContent = 'Copied'
+      } catch {
+        copyButton.textContent = 'Select and copy'
+      }
+      setTimeout(() => { copyButton.textContent = 'Copy prompt' }, 2000)
+    })
+
+    ;(async () => {
+      try {
+        const res = await fetch('api/usage', { cache: 'no-store' })
+        if (!res.ok) return
+        const u = await res.json()
+        const n = (x) => x.toLocaleString('en-US')
+        const views = u.allTime.docs === 1 ? 'view' : 'views'
+        const api = (r) => r['v1-latest'] + r['v1-hourly']
+        const el = document.getElementById('usage')
+        el.textContent =
+          `API requests: ${n(api(u.last7Days))} in the last 7 days, ${n(api(u.allTime))} total. ` +
+          `This page: ${n(u.allTime.docs)} ${views}.` + (u.since ? ` Counting since ${u.since}.` : '')
+        el.hidden = false
+      } catch {}
+    })()
+  </script>
 
   <footer class="page-foot">
     <p class="built-by">Built on a ✈️ by <a href="https://gutentag.world/?utm_source=sba-parking" target="_blank" rel="noopener noreferrer">Sam Gutentag</a></p>

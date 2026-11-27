@@ -311,3 +311,20 @@ th .key { display: inline-block; width: 12px; height: 2px; background: var(--c);
 .docs td:first-child { white-space: nowrap; }
 .docs h2 code { font-size: inherit; font-weight: 600; }
 .data-link { margin: 14px 0 0; font-size: 13px; text-align: center; }
+
+.docs .usage { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.docs .agents {
+  border: 1px solid var(--border); border-left: 3px solid var(--axis); border-radius: 8px;
+  padding: 14px 16px 2px; margin: 0 0 20px; background: var(--surface);
+}
+.docs .agents p { margin: 6px 0 10px; color: var(--ink-2); font-size: 14px; }
+.docs .agents-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.docs .agents h2 { margin: 0; }
+.docs #copy-prompt {
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+  background: var(--wash); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 12px; cursor: pointer; min-height: 32px;
+}
+.docs #copy-prompt:hover { border-color: var(--axis); }
+.docs #agent-prompt { max-height: 320px; overflow: auto; }
+.docs #agent-prompt code { white-space: pre-wrap; }

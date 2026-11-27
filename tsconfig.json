@@ -24,6 +24,7 @@
   "exclude": [
     "src/worker.ts",
     "src/d1-store.ts",
-    "src/worker-env.d.ts"
+    "src/worker-env.d.ts",
+    "src/usage.ts"
   ]
 }

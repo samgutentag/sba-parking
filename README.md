@@ -84,7 +84,9 @@ Flights are stored the same way, one row per distinct scheduled leg in a separat
 
 ## API
 
-The public, versioned API is `/api/v1/latest` and `/api/v1/hourly?date=YYYY-MM-DD` (`src/api-v1.ts`), documented for outside readers at `public/api.html` and linked from the page footer as "Access the data". Those field names are a contract: add fields, never rename or remove them; breaking changes go in a `v2`. `v1` responses carry `Access-Control-Allow-Origin: *`.
+The public, versioned API is `/api/v1/latest` and `/api/v1/hourly?date=YYYY-MM-DD` (`src/api-v1.ts`), documented for outside readers at `public/api.html` and linked from the page footer as "Access the data". Those field names are a contract: add fields, never rename or remove them; breaking changes go in a `v2`. `v1` responses carry `Access-Control-Allow-Origin: *`. The docs page opens with a "For agents" prompt to paste into a coding agent.
+
+The Worker counts `v1` requests and docs page views per UTC day in a D1 `api_usage` table (`src/usage.ts`: counts only, no IPs or user agents) and serves the totals at `/api/usage` for the counter on the docs page. Writes are batched to at most one per 5 seconds per isolate so a client hammering the API can't use up D1's daily write allowance, which the pollers share.
 
 The routes below are the page's own and change with it:
 
