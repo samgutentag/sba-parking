@@ -12,10 +12,10 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
 
-# database_id is filled in by `wrangler d1 create` (or provisioned on first deploy).
 [[d1_databases]]
 binding = "DB"
 database_name = "sba-parking"
+database_id = "14bb8114-b4aa-4434-9fdf-abbd707b0261"
 
 # Parking every 5 minutes, flights every 15. Must match PARKING_CRON / FLIGHTS_CRON in worker.ts.
 [triggers]
