@@ -156,6 +156,33 @@ a { color: inherit; text-decoration-color: var(--muted); }
 .hour-bars .bar:last-child { opacity: 1; } /* the current hour */
 .hour-bars .bar-empty { background: var(--grid); opacity: 1; }
 
+/* Plan your arrival */
+.forecast-pick { display: flex; gap: 10px; flex-wrap: wrap; }
+.forecast-pick label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.forecast-pick select {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--page);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px;
+}
+.forecast-pick select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+.forecast-lots { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 20px; }
+.forecast-lot { --chip-color: var(--axis); }
+.forecast-lot h3 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; font-weight: 600; }
+.forecast-lot h3 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--lot-color); flex: none; }
+.forecast-value { margin: 4px 0 0; font-size: 14px; color: var(--ink-2); }
+.forecast-value strong { color: var(--ink); font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.forecast-value .level { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; font-size: 12px; color: var(--ink-2); }
+.forecast-value .level::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--chip-color); }
+.forecast-today { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.forecast .hour-bars { height: 36px; }
+.forecast .hour-bars .bar { padding: 0; border: 0; cursor: pointer; opacity: 0.35; font: inherit; }
+.forecast .hour-bars .bar:last-child { opacity: 0.35; }
+.forecast .hour-bars .bar[aria-pressed="true"] { opacity: 1; }
+.forecast .hour-bars .bar:hover { opacity: 0.7; }
+.forecast .hour-bars .bar:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+.forecast .hour-bars .bar-empty { cursor: default; }
+.forecast-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.forecast-note { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+
 /* Flag-shaped tooltip for hour bars: a small pointed tail under a centered, two-line label.
    position:fixed + appended to <body> so it floats above every tile regardless of scroll or
    any tile's own hover transform/stacking context. */

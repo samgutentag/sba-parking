@@ -5,6 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>SBA Parking</title>
+  <meta name="description" content="Live open spaces in Santa Barbara Airport's short-term, long-term and economy lots, updated every 5 minutes.">
+  <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="SBA Parking">
+  <!-- Link previews. Crawlers don't resolve relative URLs, so these name the live site. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="around805">
+  <meta property="og:title" content="SBA Parking">
+  <meta property="og:description" content="Live open spaces at Santa Barbara Airport, updated every 5 minutes.">
+  <meta property="og:url" content="https://around805.com/sba-parking/">
+  <meta property="og:image" content="https://around805.com/sba-parking/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="SBA Parking: live open spaces at Santa Barbara Airport">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-weight='700' font-size='20' text-anchor='middle' fill='white'%3EP%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -19,6 +36,21 @@
   <main>
     <section class="tiles" id="tiles" aria-label="Current availability"></section>
     <p class="source-line source-line-mobile" id="source-line-mobile" aria-live="polite">Loading…</p>
+
+    <section class="card forecast" id="forecast" aria-labelledby="forecast-title" hidden>
+      <div class="card-head">
+        <div>
+          <h2 id="forecast-title">Plan your arrival</h2>
+          <p class="sub">How full each lot usually is on that day and hour, from recent weeks.</p>
+        </div>
+        <div class="forecast-pick">
+          <label>Day <select id="forecast-day"></select></label>
+          <label>Time <select id="forecast-hour"></select></label>
+        </div>
+      </div>
+      <div class="forecast-lots" id="forecast-lots"></div>
+      <p class="forecast-note" id="forecast-note"></p>
+    </section>
 
     <section class="card viz-root" id="viz-card" aria-label="Occupancy chart">
       <h2 class="visually-hidden">Occupancy chart</h2>

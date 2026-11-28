@@ -68,7 +68,7 @@ const STATUS = {
 }
 const REFRESH_MS = 60_000
 // Trend badge: how far back to compare, how big a change has to be before it's worth showing.
-// Shared 1-min-bucket fetch for two things: the trend badge (needs the last ~30 min) and the
+// Shared 15-min-bucket fetch for two things: the trend badge (needs the last ~30 min) and the
 // v2 tile's 24h free-spaces bar chart (needs the full day). One fetch covers both.
 const MINI_HISTORY_RANGE = '24h'
 const TREND_WINDOW_MS = 30 * 60_000
@@ -506,6 +506,156 @@ function hourBarsEl(buckets) {
     wrap.append(bar)
   })
   return wrap
+}
+
+// ---- Plan your arrival -------------------------------------------------------
+// How full each lot usually is at a chosen day and hour, from the same baselines as the
+// chart's dashed lines: that weekday's curve once it has enough days behind it, else the
+// all-days curve. Only "usually" numbers. For today, how far the lot is running from usual
+// right now is shown beside them rather than folded into a guessed projection.
+const FORECAST_DAYS = 7
+const forecastEls = { card: $('forecast'), day: $('forecast-day'), hour: $('forecast-hour'), lots: $('forecast-lots'), note: $('forecast-note') }
+const forecastDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short', month: 'short', day: 'numeric' })
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+function hourLabel(hour) {
+  return `${hour % 12 || 12} ${hour < 12 ? 'am' : 'pm'}`
+}
+function localHour(utcMs) {
+  return Number(fmt.parts.formatToParts(new Date(utcMs)).find((x) => x.type === 'hour').value)
+}
+// An instant inside each of the next FORECAST_DAYS local days: now for today, noon after that.
+function forecastDayInstants(nowMs) {
+  const tomorrow = nextLocalMidnight(nowMs + 1)
+  return Array.from({ length: FORECAST_DAYS }, (_, i) => (i === 0 ? nowMs : tomorrow + (i - 1) * 86400_000 + 12 * 3600_000))
+}
+function forecastCurve(typicalLot, weekday, minDays) {
+  const dow = typicalLot.dayOfWeek.find((d) => d.weekday === weekday)
+  if (isDowCurveReady(dow, minDays)) return { hours: dow.hours, sameWeekday: true, days: dow.days }
+  return { hours: typicalLot.day.hours, sameWeekday: false, days: typicalLot.days }
+}
+
+function initForecast() {
+  const nowMs = Date.now()
+  for (let h = 0; h < 24; h++) forecastEls.hour.append(new Option(hourLabel(h), String(h)))
+  // Default to the next whole hour: the soonest someone could realistically be pulling in.
+  const next = localHour(nowMs) + 1
+  fillForecastDays(nowMs, next === 24 ? 1 : 0)
+  forecastEls.hour.value = String(next % 24)
+  forecastEls.day.addEventListener('change', renderForecast)
+  forecastEls.hour.addEventListener('change', renderForecast)
+}
+// Rebuilt on each render so "Today" moves at midnight on a page left open.
+function fillForecastDays(nowMs, selected) {
+  const options = forecastDayInstants(nowMs).map((ms, i) => {
+    const label = i === 0 ? `Today, ${forecastDayFmt.format(new Date(ms))}` : i === 1 ? `Tomorrow, ${forecastDayFmt.format(new Date(ms))}` : forecastDayFmt.format(new Date(ms))
+    return new Option(label, String(i))
+  })
+  forecastEls.day.replaceChildren(...options)
+  forecastEls.day.value = String(selected)
+}
+
+function renderForecast() {
+  const typical = state.typical
+  const hasData = typical?.lots.some((l) => l.day.hours.some((v) => v !== null))
+  forecastEls.card.hidden = !hasData
+  if (!hasData) return
+  hideBarTooltip()
+  const nowMs = Date.now()
+  fillForecastDays(nowMs, Number(forecastEls.day.value) || 0)
+  const dayIndex = Number(forecastEls.day.value)
+  const hour = Number(forecastEls.hour.value)
+  const weekday = localWeekday(forecastDayInstants(nowMs)[dayIndex])
+  const minDays = typical.minDaysForDayOfWeek ?? 3
+  const lots = [...typical.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
+
+  const curves = lots.map((lot) => forecastCurve(lot, weekday, minDays))
+  forecastEls.lots.replaceChildren(
+    ...lots.map((lot, i) => {
+      const curve = curves[i]
+      const total = state.latest?.lots.find((l) => l.lotId === lot.lotId)?.total ?? lot.total
+      const percent = curve.hours[hour]
+      const el = document.createElement('div')
+      el.className = 'forecast-lot'
+      el.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
+
+      const h3 = document.createElement('h3')
+      const dot = document.createElement('span')
+      dot.className = 'dot'
+      dot.setAttribute('aria-hidden', 'true')
+      h3.append(dot, document.createTextNode(shortName(lot.lotName)))
+
+      const value = document.createElement('p')
+      value.className = 'forecast-value'
+      if (percent === null) {
+        value.textContent = 'No readings at this hour yet.'
+      } else {
+        el.style.setProperty('--chip-color', `var(${STATUS[levelFor(percent)].token})`)
+        const open = document.createElement('strong')
+        open.textContent = `~${Math.max(0, Math.round(total * (1 - percent / 100))).toLocaleString()}`
+        const level = document.createElement('span')
+        level.className = 'level'
+        level.textContent = `usually ${Math.round(percent)}% full`
+        value.append(open, document.createTextNode(` open of ${total.toLocaleString()}`), level)
+      }
+      el.append(h3, value)
+
+      if (dayIndex === 0) {
+        const live = state.latest?.lots.find((l) => l.lotId === lot.lotId)
+        const usualNow = live && !live.stale ? curve.hours[localHour(Date.parse(live.sourceUpdatedAt))] : null
+        if (usualNow !== null && usualNow !== undefined) {
+          const dev = Math.round(live.percent - usualNow)
+          const today = document.createElement('p')
+          today.className = 'forecast-today'
+          today.textContent = Math.abs(dev) < 5
+            ? 'Right now: about as full as usual for this hour.'
+            : `Right now: ${Math.abs(dev)} points ${dev > 0 ? 'fuller' : 'emptier'} than usual for this hour.`
+          el.append(today)
+        }
+      }
+
+      const bars = document.createElement('div')
+      bars.className = 'hour-bars'
+      bars.setAttribute('role', 'group')
+      bars.setAttribute('aria-label', `${shortName(lot.lotName)}: usual open spots by hour. Choose an hour.`)
+      // Scaled to this lot's roomiest hour, like the tiles' bars, so a big lot that's nearly
+      // full all day still shows its daily shape instead of a flat line.
+      const openByHour = curve.hours.map((p) => (p === null ? null : Math.max(0, Math.round(total * (1 - p / 100)))))
+      const maxOpen = Math.max(1, ...openByHour.filter((v) => v !== null))
+      openByHour.forEach((openAt, h) => {
+        const bar = document.createElement('button')
+        bar.type = 'button'
+        bar.className = openAt === null ? 'bar bar-empty' : 'bar'
+        bar.style.height = openAt === null ? '4%' : `${Math.max(6, (openAt / maxOpen) * 100)}%`
+        bar.setAttribute('aria-pressed', String(h === hour))
+        bar.setAttribute('aria-label', openAt === null ? `${hourLabel(h)}: no data` : `${hourLabel(h)}: about ${openAt} open`)
+        if (openAt !== null) {
+          bar.addEventListener('pointerenter', () => showBarTooltip(bar, hourLabel(h), `~${openAt} open`))
+          bar.addEventListener('pointerleave', hideBarTooltip)
+          bar.addEventListener('click', () => {
+            forecastEls.hour.value = String(h)
+            renderForecast()
+          })
+        } else {
+          bar.disabled = true
+        }
+        bars.append(bar)
+      })
+      const axis = document.createElement('div')
+      axis.className = 'forecast-axis'
+      axis.setAttribute('aria-hidden', 'true')
+      for (const t of ['12 am', '6 am', 'noon', '6 pm', '11 pm']) axis.append(Object.assign(document.createElement('span'), { textContent: t }))
+      el.append(bars, axis)
+      return el
+    }),
+  )
+
+  const name = WEEKDAY_NAMES[weekday]
+  const sameWeekday = curves.filter((c) => c.sameWeekday)
+  const basis = sameWeekday.length === curves.length
+    ? `Averaged over the last ${Math.min(...sameWeekday.map((c) => c.days))} ${name}s.`
+    : `Not enough ${name}s recorded yet${sameWeekday.length ? ' for every lot' : ''}, so ${sameWeekday.length ? 'some lots use' : 'this uses'} every day of the week.`
+  forecastEls.note.textContent = `${basis} Holidays and big events can run well above usual; check the live counts above before you go.`
 }
 
 // Tracker status, in the footer: each poller's last result, verbatim error included. Kept out
@@ -1109,7 +1259,7 @@ function renderFlightsBoard(data) {
 
 async function loadLatest() {
   try {
-    // This 24h/1-min-bucket fetch is independent of the chart's range selector, so the tile
+    // This 24h/15-min-bucket fetch is independent of the chart's range selector, so the tile
     // trend badges and 24h bar chart don't shift when you switch the chart to 7d/30d/all.
     const [latest, mini] = await Promise.all([
       getJson('api/latest'),
@@ -1123,6 +1273,7 @@ async function loadLatest() {
     els.sourceLine.textContent = message
     els.sourceLineMobile.textContent = message
   }
+  renderForecast()
 }
 
 // Guards against overlapping loadHistory() calls resolving out of order (e.g. clicking two
@@ -1170,6 +1321,7 @@ async function loadTypical() {
     state.typical = null
   }
   updateTypicalAvailability()
+  renderForecast()
   if (state.history) renderChart(state.history)
 }
 
@@ -1270,6 +1422,7 @@ try {
 } catch {}
 updateTypicalAvailability()
 updateFlightsAvailability()
+initForecast()
 
 loadLatest()
 loadHistory()
