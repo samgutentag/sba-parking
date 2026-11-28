@@ -34,26 +34,19 @@
   </header>
 
   <main>
-    <section class="tiles" id="tiles" aria-label="Current availability"></section>
+    <section class="plan-bar" aria-label="Where to park">
+      <p class="best-bet" id="best-bet" aria-live="polite"></p>
+      <div class="when" id="when" hidden>
+        <label>When <select id="when-day"></select></label>
+        <label id="when-hour-label" hidden>at <select id="when-hour"></select></label>
+      </div>
+    </section>
+    <section class="tiles" id="tiles" aria-label="Availability by lot"></section>
+    <p class="when-note" id="when-note" hidden></p>
     <p class="source-line source-line-mobile" id="source-line-mobile" aria-live="polite">Loading…</p>
 
-    <section class="card forecast" id="forecast" aria-labelledby="forecast-title" hidden>
-      <div class="card-head">
-        <div>
-          <h2 id="forecast-title">Plan your arrival</h2>
-          <p class="sub">How full each lot usually is on that day and hour, from recent weeks.</p>
-        </div>
-        <div class="forecast-pick">
-          <label>Day <select id="forecast-day"></select></label>
-          <label>Time <select id="forecast-hour"></select></label>
-        </div>
-      </div>
-      <div class="forecast-lots" id="forecast-lots"></div>
-      <p class="forecast-note" id="forecast-note"></p>
-    </section>
-
-    <section class="card viz-root" id="viz-card" aria-label="Occupancy chart">
-      <h2 class="visually-hidden">Occupancy chart</h2>
+    <details class="card viz-root" id="viz-card" open>
+      <summary class="viz-summary"><h2>History</h2><span class="sub">Open spots over time, by lot</span></summary>
       <div class="card-head">
         <div class="viz-controls">
           <div class="seg" role="group" aria-label="Time range" id="range-group">
@@ -82,7 +75,7 @@
         <div class="visually-hidden" id="chart-status" aria-live="polite" aria-atomic="true"></div>
         <p class="empty" id="chart-empty" hidden>No readings in this range yet. The poller stores a new row each time the airport feed changes.</p>
       </div>
-    </section>
+    </details>
 
     <section class="card" id="flights-board">
       <div class="card-head">

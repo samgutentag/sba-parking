@@ -69,7 +69,7 @@ const STATUS = {
 const REFRESH_MS = 60_000
 // Trend badge: how far back to compare, how big a change has to be before it's worth showing.
 // Shared 15-min-bucket fetch for two things: the trend badge (needs the last ~30 min) and the
-// v2 tile's 24h free-spaces bar chart (needs the full day). One fetch covers both.
+// tiles' day strips (today since midnight, at most 24 h). One fetch covers both.
 const MINI_HISTORY_RANGE = '24h'
 const TREND_WINDOW_MS = 30 * 60_000
 const TREND_THRESHOLD_PP = 5
@@ -83,6 +83,7 @@ const state = {
   range: 'today',
   timeZone: 'America/Los_Angeles',
   latest: null,
+  mini: null, // last 24h at 15-min buckets, for the tiles' trend badges and day strips
   history: null,
   typical: null,
   showTypicalDay: false,
@@ -243,7 +244,11 @@ async function getJson(url) {
 
 // ---- Tiles -------------------------------------------------------------------
 
-function renderTiles(latest, trend) {
+const USUAL_WORD = { open: 'Open', busy: 'Open', limited: 'Limited', full: 'Full' }
+
+// `when` null shows live counts; otherwise each tile shows that lot's usual numbers for the
+// picked day and hour (see currentWhen), styled so it can't be mistaken for a live reading.
+function renderTiles(latest, trend, when = null) {
   hideBarTooltip() // a full re-render replaces the bars a stuck tooltip might be pointing at
   els.tiles.replaceChildren()
   if (!latest.lots.length) {
@@ -256,17 +261,21 @@ function renderTiles(latest, trend) {
   const nowMs = Date.now()
   const orderedLots = [...latest.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
   orderedLots.forEach((lot, i) => {
-    const level = lot.level ?? levelFor(lot.percent)
-    const status = STATUS[level]
+    const typicalLot = when ? typicalLotFor(lot.lotId) : null
+    const usualPercent = typicalLot ? usualCurve(typicalLot, when.weekday).hours[when.hour] ?? null : null
+    const percent = when ? usualPercent : lot.percent
+    const level = when ? (percent === null ? null : levelFor(percent)) : lot.level ?? levelFor(lot.percent)
+    const status = level ? STATUS[level] : null
+    const free = when ? (percent === null ? null : Math.max(0, Math.round(lot.total * (1 - percent / 100)))) : lot.free
     const tile = document.createElement('article')
     // A stale reading still shows its numbers (they're the last real ones), but the status
     // chip stops claiming "Open"/"Limited" about right now and the trend is dropped, since
     // neither means anything once the feed has stopped moving.
-    const stale = lot.stale === true
-    tile.className = stale ? 'tile tile-stale' : 'tile'
+    const stale = !when && lot.stale === true
+    tile.className = when ? 'tile tile-usual' : stale ? 'tile tile-stale' : 'tile'
     tile.dataset.lotId = lot.lotId
     tile.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
-    tile.style.setProperty('--chip-color', stale ? 'var(--muted)' : `var(${status.token})`)
+    tile.style.setProperty('--chip-color', stale || !status ? 'var(--muted)' : `var(${status.token})`)
     tile.addEventListener('pointerenter', () => setLotHover(lot.lotId))
     tile.addEventListener('pointerleave', () => setLotHover(null))
 
@@ -275,20 +284,20 @@ function renderTiles(latest, trend) {
     const name = document.createElement('span')
     name.textContent = lot.lotName
     label.append(name)
-    if (!stale) {
+    if (!stale && status) {
       const chip = document.createElement('span')
       chip.className = 'chip'
-      chip.title = statusChipTitle(lot)
+      chip.title = when ? `How full this lot usually is ${when.label.toLowerCase()}.` : statusChipTitle(lot)
       const glyph = document.createElement('span')
       glyph.className = 'glyph'
       glyph.setAttribute('aria-hidden', 'true')
       glyph.textContent = status.glyph
-      chip.append(glyph, document.createTextNode(lot.status))
+      chip.append(glyph, document.createTextNode(when ? `Usually ${USUAL_WORD[level].toLowerCase()}` : lot.status))
       label.append(chip)
     }
 
     const trendLotHist = trend?.lots.find((l) => l.lotId === lot.lotId)
-    const t = trendLotHist
+    const t = trendLotHist && !when
       ? trendFor(lot.percent, trendLotHist.points, TREND_WINDOW_MS, Date.parse(lot.sourceUpdatedAt))
       : null
 
@@ -298,15 +307,17 @@ function renderTiles(latest, trend) {
 
     const ringCol = document.createElement('div')
     ringCol.className = 'tile-ring'
-    ringCol.append(ringChart(lot.percent, 'var(--chip-color)'))
+    ringCol.append(ringChart(percent ?? 0, 'var(--chip-color)'))
 
     const valueCol = document.createElement('div')
     valueCol.className = 'tile-value'
     const valueMain = document.createElement('span')
     valueMain.className = 'value-main'
-    valueMain.textContent = lot.free.toLocaleString()
+    valueMain.textContent = free === null ? '–' : `${when ? '~' : ''}${free.toLocaleString()}`
     const small = document.createElement('small')
-    small.textContent = `open spots of ${lot.total.toLocaleString()}`
+    small.textContent = free === null
+      ? 'no history for this hour yet'
+      : `${when ? 'usually open' : 'open spots'} of ${lot.total.toLocaleString()}`
     valueMain.append(small)
     valueCol.append(valueMain)
 
@@ -337,25 +348,38 @@ function renderTiles(latest, trend) {
     meter.setAttribute('role', 'meter')
     meter.setAttribute('aria-valuemin', '0')
     meter.setAttribute('aria-valuemax', '100')
-    meter.setAttribute('aria-valuenow', String(Math.round(lot.percent)))
-    meter.setAttribute('aria-label', `${lot.lotName} occupancy`)
+    meter.setAttribute('aria-valuenow', String(Math.round(percent ?? 0)))
+    meter.setAttribute('aria-label', `${lot.lotName} ${when ? 'usual ' : ''}occupancy`)
     const fill = document.createElement('span')
-    fill.style.width = `${Math.min(100, lot.percent)}%`
+    fill.style.width = `${Math.min(100, percent ?? 0)}%`
     meter.append(fill)
 
-    const bars = hourBarsEl(hourlyFreeAverages(trendLotHist, nowMs))
+    const strip = dayStripEl(lot, trendLotHist, when, nowMs)
 
     const detail = document.createElement('div')
     detail.className = 'detail'
     const left = document.createElement('span')
-    left.textContent = `${Math.round(avail(lot.percent))}% available · ${lot.free.toLocaleString()} open`
     const right = document.createElement('span')
-    right.textContent = asOf(lot.sourceUpdatedAt)
+    if (when) {
+      left.textContent = percent === null ? '' : `usually ${Math.round(avail(percent))}% available`
+      right.textContent = when.label
+    } else {
+      left.textContent = `${Math.round(avail(lot.percent))}% available · ${lot.free.toLocaleString()} open`
+      right.textContent = asOf(lot.sourceUpdatedAt)
+    }
     detail.append(left, right)
 
     tile.append(label)
     if (stale) tile.append(staleNoteEl(latest.feed?.cause, lot.sourceUpdatedAt))
-    tile.append(mid, meter, bars, detail)
+    tile.append(mid, meter, strip, detail)
+
+    const vsUsual = when ? null : vsUsualText(lot)
+    if (vsUsual) {
+      const vs = document.createElement('p')
+      vs.className = 'vs-usual'
+      vs.textContent = vsUsual
+      tile.append(vs)
+    }
 
     const info = LOT_INFO[lot.lotId]
     if (info) {
@@ -432,21 +456,6 @@ function ringChart(occupiedPercent, colorVar) {
 // most recent hour last (right). A bucket with no readings yet renders as a near-empty bar
 // rather than being skipped, so the chart always shows 24 slots even while data is thin.
 // `ms` is that bucket's approximate clock hour, kept for the hover tooltip's hour label.
-function hourlyFreeAverages(historyLot, nowMs) {
-  const buckets = Array.from({ length: 24 }, () => ({ sum: 0, count: 0 }))
-  for (const [ts, occ, tot] of historyLot?.points ?? []) {
-    const ageMs = nowMs - ts * 1000
-    if (ageMs < 0 || ageMs >= 24 * 3600_000) continue
-    const idx = 23 - Math.floor(ageMs / 3600_000)
-    buckets[idx].sum += Math.max(0, tot - occ)
-    buckets[idx].count += 1
-  }
-  return buckets.map((b, idx) => ({
-    ms: nowMs - (23 - idx) * 3600_000,
-    value: b.count ? b.sum / b.count : null,
-  }))
-}
-
 // A single shared flag-shaped tooltip for every hour bar on the page, positioned per-hover
 // rather than one tooltip element per bar. Custom rather than a native `title` attribute for
 // three things a title tooltip can't do: a pointed flag shape, centered multi-line text, and
@@ -486,37 +495,15 @@ function hideBarTooltip() {
   if (barTooltipEl) barTooltipEl.hidden = true
 }
 
-function hourBarsEl(buckets) {
-  const wrap = document.createElement('div')
-  wrap.className = 'hour-bars'
-  wrap.setAttribute('role', 'img')
-  wrap.setAttribute('aria-label', 'Average open spots by hour, last 24 hours, oldest to most recent')
-  const known = buckets.map((b) => b.value).filter((v) => v !== null)
-  const max = Math.max(1, ...known)
-  buckets.forEach(({ ms, value }) => {
-    const bar = document.createElement('span')
-    bar.className = value === null ? 'bar bar-empty' : 'bar'
-    bar.style.height = value === null ? '4%' : `${Math.max(6, (value / max) * 100)}%`
-    if (value !== null) {
-      const hourLabel = fmt.hourOnly.format(new Date(ms))
-      const valueLabel = `${Math.round(value)} available`
-      bar.addEventListener('pointerenter', () => showBarTooltip(bar, hourLabel, valueLabel))
-      bar.addEventListener('pointerleave', hideBarTooltip)
-    }
-    wrap.append(bar)
-  })
-  return wrap
-}
-
-// ---- Plan your arrival -------------------------------------------------------
-// How full each lot usually is at a chosen day and hour, from the same baselines as the
-// chart's dashed lines: that weekday's curve once it has enough days behind it, else the
-// all-days curve. Only "usually" numbers. For today, how far the lot is running from usual
-// right now is shown beside them rather than folded into a guessed projection.
-const FORECAST_DAYS = 7
-const forecastEls = { card: $('forecast'), day: $('forecast-day'), hour: $('forecast-hour'), lots: $('forecast-lots'), note: $('forecast-note') }
-const forecastDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short', month: 'short', day: 'numeric' })
+// ---- When: now, or a typical day and hour ---------------------------------------
+// The tiles show live counts by default. Picking a day and hour switches them to that lot's
+// usual numbers for then, from the same baselines as the chart's dashed lines: that weekday's
+// curve once it has enough days behind it, else the all-days curve. Only "usually" numbers;
+// how far today is running from usual is shown beside them, never folded into a projection.
+const WHEN_DAYS = 7
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const whenDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short', month: 'short', day: 'numeric' })
+const whenEls = { wrap: $('when'), day: $('when-day'), hourLabel: $('when-hour-label'), hour: $('when-hour'), note: $('when-note'), bestBet: $('best-bet') }
 
 function hourLabel(hour) {
   return `${hour % 12 || 12} ${hour < 12 ? 'am' : 'pm'}`
@@ -524,138 +511,186 @@ function hourLabel(hour) {
 function localHour(utcMs) {
   return Number(fmt.parts.formatToParts(new Date(utcMs)).find((x) => x.type === 'hour').value)
 }
-// An instant inside each of the next FORECAST_DAYS local days: now for today, noon after that.
-function forecastDayInstants(nowMs) {
+// An instant inside each of the next WHEN_DAYS local days: now for today, noon after that.
+function whenDayInstants(nowMs) {
   const tomorrow = nextLocalMidnight(nowMs + 1)
-  return Array.from({ length: FORECAST_DAYS }, (_, i) => (i === 0 ? nowMs : tomorrow + (i - 1) * 86400_000 + 12 * 3600_000))
+  return Array.from({ length: WHEN_DAYS }, (_, i) => (i === 0 ? nowMs : tomorrow + (i - 1) * 86400_000 + 12 * 3600_000))
 }
-function forecastCurve(typicalLot, weekday, minDays) {
+function usualCurve(typicalLot, weekday) {
+  const minDays = state.typical?.minDaysForDayOfWeek ?? 3
   const dow = typicalLot.dayOfWeek.find((d) => d.weekday === weekday)
   if (isDowCurveReady(dow, minDays)) return { hours: dow.hours, sameWeekday: true, days: dow.days }
   return { hours: typicalLot.day.hours, sameWeekday: false, days: typicalLot.days }
 }
+function typicalLotFor(lotId) {
+  return state.typical?.lots.find((l) => l.lotId === lotId) ?? null
+}
+// null means "now"; otherwise { dayIndex, hour, weekday, label }.
+function currentWhen() {
+  if (whenEls.day.value === 'now' || !state.typical) return null
+  const dayIndex = Number(whenEls.day.value)
+  const hour = Number(whenEls.hour.value)
+  const instant = whenDayInstants(Date.now())[dayIndex]
+  const day = dayIndex === 0 ? 'Today' : dayIndex === 1 ? 'Tomorrow' : weekdayFmt.format(new Date(instant))
+  return { dayIndex, hour, weekday: localWeekday(instant), label: `${day} at ${hourLabel(hour)}` }
+}
 
-function initForecast() {
-  const nowMs = Date.now()
-  for (let h = 0; h < 24; h++) forecastEls.hour.append(new Option(hourLabel(h), String(h)))
-  // Default to the next whole hour: the soonest someone could realistically be pulling in.
-  const next = localHour(nowMs) + 1
-  fillForecastDays(nowMs, next === 24 ? 1 : 0)
-  forecastEls.hour.value = String(next % 24)
-  forecastEls.day.addEventListener('change', renderForecast)
-  forecastEls.hour.addEventListener('change', renderForecast)
+function initWhen() {
+  for (let h = 0; h < 24; h++) whenEls.hour.append(new Option(hourLabel(h), String(h)))
+  fillWhenDays(Date.now(), 'now')
+  whenEls.day.addEventListener('change', () => {
+    // Default a newly picked day to the next whole hour: the soonest anyone could pull in.
+    if (whenEls.day.value !== 'now' && whenEls.hourLabel.hidden) whenEls.hour.value = String((localHour(Date.now()) + 1) % 24)
+    rerenderTiles()
+  })
+  whenEls.hour.addEventListener('change', rerenderTiles)
 }
 // Rebuilt on each render so "Today" moves at midnight on a page left open.
-function fillForecastDays(nowMs, selected) {
-  const options = forecastDayInstants(nowMs).map((ms, i) => {
-    const label = i === 0 ? `Today, ${forecastDayFmt.format(new Date(ms))}` : i === 1 ? `Tomorrow, ${forecastDayFmt.format(new Date(ms))}` : forecastDayFmt.format(new Date(ms))
-    return new Option(label, String(i))
+function fillWhenDays(nowMs, selected) {
+  const options = [new Option('Now', 'now')]
+  whenDayInstants(nowMs).forEach((ms, i) => {
+    const date = whenDayFmt.format(new Date(ms))
+    options.push(new Option(i === 0 ? `Later today, ${date}` : i === 1 ? `Tomorrow, ${date}` : date, String(i)))
   })
-  forecastEls.day.replaceChildren(...options)
-  forecastEls.day.value = String(selected)
+  whenEls.day.replaceChildren(...options)
+  whenEls.day.value = selected
+}
+function setWhen(dayValue, hour) {
+  whenEls.day.value = dayValue
+  whenEls.hour.value = String(hour)
+  rerenderTiles()
 }
 
-function renderForecast() {
-  const typical = state.typical
-  const hasData = typical?.lots.some((l) => l.day.hours.some((v) => v !== null))
-  forecastEls.card.hidden = !hasData
-  if (!hasData) return
-  hideBarTooltip()
-  const nowMs = Date.now()
-  fillForecastDays(nowMs, Number(forecastEls.day.value) || 0)
-  const dayIndex = Number(forecastEls.day.value)
-  const hour = Number(forecastEls.hour.value)
-  const weekday = localWeekday(forecastDayInstants(nowMs)[dayIndex])
-  const minDays = typical.minDaysForDayOfWeek ?? 3
-  const lots = [...typical.lots].sort((a, b) => TILE_ORDER.indexOf(a.lotId) - TILE_ORDER.indexOf(b.lotId))
+function rerenderTiles() {
+  if (!state.latest) return
+  const hasTypical = !!state.typical?.lots.some((l) => l.day.hours.some((v) => v !== null))
+  whenEls.wrap.hidden = !hasTypical
+  fillWhenDays(Date.now(), hasTypical ? whenEls.day.value || 'now' : 'now')
+  const when = currentWhen()
+  whenEls.hourLabel.hidden = !when
+  renderTiles(state.latest, state.mini, when)
+  renderBestBet(state.latest, when)
+  renderWhenNote(when)
+}
 
-  const curves = lots.map((lot) => forecastCurve(lot, weekday, minDays))
-  forecastEls.lots.replaceChildren(
-    ...lots.map((lot, i) => {
-      const curve = curves[i]
-      const total = state.latest?.lots.find((l) => l.lotId === lot.lotId)?.total ?? lot.total
-      const percent = curve.hours[hour]
-      const el = document.createElement('div')
-      el.className = 'forecast-lot'
-      el.style.setProperty('--lot-color', lotColorVar(lot.lotId, i))
-
-      const h3 = document.createElement('h3')
-      const dot = document.createElement('span')
-      dot.className = 'dot'
-      dot.setAttribute('aria-hidden', 'true')
-      h3.append(dot, document.createTextNode(shortName(lot.lotName)))
-
-      const value = document.createElement('p')
-      value.className = 'forecast-value'
-      if (percent === null) {
-        value.textContent = 'No readings at this hour yet.'
-      } else {
-        el.style.setProperty('--chip-color', `var(${STATUS[levelFor(percent)].token})`)
-        const open = document.createElement('strong')
-        open.textContent = `~${Math.max(0, Math.round(total * (1 - percent / 100))).toLocaleString()}`
-        const level = document.createElement('span')
-        level.className = 'level'
-        level.textContent = `usually ${Math.round(percent)}% full`
-        value.append(open, document.createTextNode(` open of ${total.toLocaleString()}`), level)
-      }
-      el.append(h3, value)
-
-      if (dayIndex === 0) {
-        const live = state.latest?.lots.find((l) => l.lotId === lot.lotId)
-        const usualNow = live && !live.stale ? curve.hours[localHour(Date.parse(live.sourceUpdatedAt))] : null
-        if (usualNow !== null && usualNow !== undefined) {
-          const dev = Math.round(live.percent - usualNow)
-          const today = document.createElement('p')
-          today.className = 'forecast-today'
-          today.textContent = Math.abs(dev) < 5
-            ? 'Right now: about as full as usual for this hour.'
-            : `Right now: ${Math.abs(dev)} points ${dev > 0 ? 'fuller' : 'emptier'} than usual for this hour.`
-          el.append(today)
-        }
-      }
-
-      const bars = document.createElement('div')
-      bars.className = 'hour-bars'
-      bars.setAttribute('role', 'group')
-      bars.setAttribute('aria-label', `${shortName(lot.lotName)}: usual open spots by hour. Choose an hour.`)
-      // Scaled to this lot's roomiest hour, like the tiles' bars, so a big lot that's nearly
-      // full all day still shows its daily shape instead of a flat line.
-      const openByHour = curve.hours.map((p) => (p === null ? null : Math.max(0, Math.round(total * (1 - p / 100)))))
-      const maxOpen = Math.max(1, ...openByHour.filter((v) => v !== null))
-      openByHour.forEach((openAt, h) => {
-        const bar = document.createElement('button')
-        bar.type = 'button'
-        bar.className = openAt === null ? 'bar bar-empty' : 'bar'
-        bar.style.height = openAt === null ? '4%' : `${Math.max(6, (openAt / maxOpen) * 100)}%`
-        bar.setAttribute('aria-pressed', String(h === hour))
-        bar.setAttribute('aria-label', openAt === null ? `${hourLabel(h)}: no data` : `${hourLabel(h)}: about ${openAt} open`)
-        if (openAt !== null) {
-          bar.addEventListener('pointerenter', () => showBarTooltip(bar, hourLabel(h), `~${openAt} open`))
-          bar.addEventListener('pointerleave', hideBarTooltip)
-          bar.addEventListener('click', () => {
-            forecastEls.hour.value = String(h)
-            renderForecast()
-          })
-        } else {
-          bar.disabled = true
-        }
-        bars.append(bar)
-      })
-      const axis = document.createElement('div')
-      axis.className = 'forecast-axis'
-      axis.setAttribute('aria-hidden', 'true')
-      for (const t of ['12 am', '6 am', 'noon', '6 pm', '11 pm']) axis.append(Object.assign(document.createElement('span'), { textContent: t }))
-      el.append(bars, axis)
-      return el
-    }),
-  )
-
-  const name = WEEKDAY_NAMES[weekday]
+function renderWhenNote(when) {
+  whenEls.note.hidden = !when
+  if (!when) return
+  const curves = state.typical.lots.map((l) => usualCurve(l, when.weekday))
+  const name = WEEKDAY_NAMES[when.weekday]
   const sameWeekday = curves.filter((c) => c.sameWeekday)
   const basis = sameWeekday.length === curves.length
-    ? `Averaged over the last ${Math.min(...sameWeekday.map((c) => c.days))} ${name}s.`
-    : `Not enough ${name}s recorded yet${sameWeekday.length ? ' for every lot' : ''}, so ${sameWeekday.length ? 'some lots use' : 'this uses'} every day of the week.`
-  forecastEls.note.textContent = `${basis} Holidays and big events can run well above usual; check the live counts above before you go.`
+    ? `Usual numbers, averaged over the last ${Math.min(...sameWeekday.map((c) => c.days))} ${name}s.`
+    : `Usual numbers. Not enough ${name}s recorded yet${sameWeekday.length ? ' for every lot' : ''}, so ${sameWeekday.length ? 'some lots use' : 'this uses'} every day of the week.`
+  whenEls.note.textContent = `${basis} Holidays and big events can run well above usual; pick Now for live counts.`
+}
+
+// One plain sentence answering "where should I park?": the lot with the most open spots, and
+// any lot that's nearly full. Counts only; it doesn't weigh price or the shuttle ride.
+function renderBestBet(latest, when) {
+  const rows = latest.lots
+    .map((lot) => {
+      if (!when) return lot.stale ? null : { name: shortName(lot.lotName), open: lot.free, percent: lot.percent }
+      const t = typicalLotFor(lot.lotId)
+      const p = t ? usualCurve(t, when.weekday).hours[when.hour] : null
+      return p === null || p === undefined ? null : { name: shortName(lot.lotName), open: Math.max(0, Math.round(lot.total * (1 - p / 100))), percent: p }
+    })
+    .filter(Boolean)
+  if (!rows.length) {
+    whenEls.bestBet.textContent = when ? `No history for ${when.label.toLowerCase()} yet.` : 'No fresh counts from the airport right now. The tiles show its last numbers.'
+    return
+  }
+  const usually = when ? 'usually ' : ''
+  const best = rows.reduce((a, b) => (b.open > a.open ? b : a))
+  const prefix = when ? `${when.label}: ` : ''
+  let text = `${prefix}${best.name} ${usually}has the most room, ${when ? '~' : ''}${best.open.toLocaleString()} open${when ? '' : ' right now'}.`
+  const tight = rows.filter((r) => r !== best && r.percent >= 90)
+  if (tight.length) {
+    const names = tight.map((r) => r.name).join(' and ')
+    const verb = tight.length > 1 ? 'are' : 'is'
+    text += ` ${names} ${verb} ${usually}${tight.every((r) => r.percent >= 100) ? 'full' : 'nearly full'}.`
+  }
+  whenEls.bestBet.textContent = text
+}
+
+// The tile's 24-hour strip, midnight to midnight. Live mode: earlier hours are what actually
+// happened today, later hours are what's usual for today's weekday (drawn faint), so one strip
+// shows both the day so far and what's coming. Picked-time mode: the usual curve for that day,
+// with the picked hour highlighted. Bars that show a usual hour can be tapped to pick it.
+function dayStripEl(lot, history, when, nowMs) {
+  const typicalLot = typicalLotFor(lot.lotId)
+  const total = lot.total
+  const openFor = (p) => (p === null || p === undefined ? null : Math.max(0, Math.round(total * (1 - p / 100))))
+  const bars = []
+  if (when) {
+    const curve = typicalLot ? usualCurve(typicalLot, when.weekday).hours : Array(24).fill(null)
+    for (let h = 0; h < 24; h++) bars.push({ h, value: openFor(curve[h]), kind: 'usual', picked: h === when.hour })
+  } else {
+    const todayStart = nextLocalMidnight(nowMs - 86400_000 + 1)
+    const nowHour = localHour(nowMs)
+    const sums = Array.from({ length: 24 }, () => ({ sum: 0, n: 0 }))
+    for (const [ts, occ, tot] of history?.points ?? []) {
+      const ms = ts * 1000
+      if (ms < todayStart || ms > nowMs) continue
+      const s = sums[localHour(ms)]
+      s.sum += Math.max(0, tot - occ)
+      s.n += 1
+    }
+    const curve = typicalLot ? usualCurve(typicalLot, localWeekday(nowMs)).hours : Array(24).fill(null)
+    for (let h = 0; h < 24; h++) {
+      if (h <= nowHour) {
+        const s = sums[h]
+        bars.push({ h, value: s.n ? Math.round(s.sum / s.n) : null, kind: 'actual', now: h === nowHour })
+      } else {
+        bars.push({ h, value: openFor(curve[h]), kind: 'usual' })
+      }
+    }
+  }
+
+  const wrap = document.createElement('div')
+  wrap.className = 'hour-bars day-strip'
+  wrap.setAttribute('role', 'group')
+  wrap.setAttribute('aria-label', when
+    ? `${shortName(lot.lotName)}: usual open spots by hour, ${when.label.replace(/ at .*/, '')}`
+    : `${shortName(lot.lotName)}: open spots by hour today, actual so far and usual for later hours`)
+  const max = Math.max(1, ...bars.map((b) => b.value).filter((v) => v !== null))
+  for (const b of bars) {
+    const pickable = b.kind === 'usual' && b.value !== null
+    const bar = document.createElement(pickable ? 'button' : 'span')
+    if (pickable) bar.type = 'button'
+    bar.className = `bar bar-${b.kind}${b.value === null ? ' bar-empty' : ''}${b.now ? ' bar-now' : ''}${b.picked ? ' bar-picked' : ''}`
+    bar.style.height = b.value === null ? '4%' : `${Math.max(6, (b.value / max) * 100)}%`
+    const valueText = b.value === null ? 'no data' : b.kind === 'usual' ? `usually ~${b.value} open` : `${b.value} open${b.now ? ' so far' : ''}`
+    if (pickable) {
+      bar.setAttribute('aria-label', `${hourLabel(b.h)}: ${valueText}`)
+      if (b.picked) bar.setAttribute('aria-pressed', 'true')
+      bar.addEventListener('click', () => setWhen(when ? String(when.dayIndex) : '0', b.h))
+    }
+    if (b.value !== null) {
+      bar.addEventListener('pointerenter', () => showBarTooltip(bar, hourLabel(b.h), valueText))
+      bar.addEventListener('pointerleave', hideBarTooltip)
+    }
+    wrap.append(bar)
+  }
+  const axis = document.createElement('div')
+  axis.className = 'strip-axis'
+  axis.setAttribute('aria-hidden', 'true')
+  for (const t of ['12 am', '6 am', 'noon', '6 pm', '11 pm']) axis.append(Object.assign(document.createElement('span'), { textContent: t }))
+  const el = document.createElement('div')
+  el.append(wrap, axis)
+  return el
+}
+
+// How far a live lot is running from its usual for this hour, in plain words. Null when there's
+// no baseline for this hour or the reading is stale.
+function vsUsualText(lot) {
+  const t = typicalLotFor(lot.lotId)
+  if (!t || lot.stale) return null
+  const usual = usualCurve(t, localWeekday(Date.now())).hours[localHour(Date.parse(lot.sourceUpdatedAt))]
+  if (usual === null || usual === undefined) return null
+  const dev = Math.round(lot.percent - usual)
+  if (Math.abs(dev) < 5) return 'About as full as usual for this hour.'
+  return `${Math.abs(dev)} points ${dev > 0 ? 'fuller' : 'emptier'} than usual for this hour.`
 }
 
 // Tracker status, in the footer: each poller's last result, verbatim error included. Kept out
@@ -1266,14 +1301,14 @@ async function loadLatest() {
       getJson(`api/history?range=${MINI_HISTORY_RANGE}`),
     ])
     state.latest = latest
-    renderTiles(latest, mini)
+    state.mini = mini
+    rerenderTiles()
     renderSourceLine(latest)
   } catch (err) {
     const message = `Could not reach the service (${err.message})`
     els.sourceLine.textContent = message
     els.sourceLineMobile.textContent = message
   }
-  renderForecast()
 }
 
 // Guards against overlapping loadHistory() calls resolving out of order (e.g. clicking two
@@ -1321,7 +1356,7 @@ async function loadTypical() {
     state.typical = null
   }
   updateTypicalAvailability()
-  renderForecast()
+  rerenderTiles()
   if (state.history) renderChart(state.history)
 }
 
@@ -1399,6 +1434,20 @@ $('range-group').addEventListener('click', (ev) => {
   updateFlightsAvailability()
   loadHistory()
 })
+// The history chart starts collapsed on phones, where most visits are a quick check of the
+// tiles; elsewhere it starts open. Whatever the viewer picks last is remembered.
+const vizCard = $('viz-card')
+try {
+  const saved = localStorage.getItem('sba-history-open')
+  vizCard.open = saved !== null ? saved === '1' : !matchMedia('(max-width: 560px)').matches
+} catch {
+  vizCard.open = !matchMedia('(max-width: 560px)').matches
+}
+vizCard.addEventListener('toggle', () => {
+  try { localStorage.setItem('sba-history-open', vizCard.open ? '1' : '0') } catch {}
+  if (vizCard.open && state.history) renderChart(state.history)
+})
+
 let resizeTimer
 new ResizeObserver(() => {
   clearTimeout(resizeTimer)
@@ -1422,7 +1471,7 @@ try {
 } catch {}
 updateTypicalAvailability()
 updateFlightsAvailability()
-initForecast()
+initWhen()
 
 loadLatest()
 loadHistory()
