@@ -80,7 +80,7 @@ const TREND = {
 }
 
 const state = {
-  range: 'today',
+  range: '7d',
   timeZone: 'America/Los_Angeles',
   latest: null,
   mini: null, // last 24h at 15-min buckets, for the tiles' trend badges and day strips
@@ -97,6 +97,8 @@ const state = {
 // Baseline overlays repeat a 24h curve across the visible window, which only reads as a
 // reference line on short ranges; over 30d/all it would just be a weekly sawtooth under
 // months of real data, so the toggle hides itself there instead of rendering noise.
+// Versioned so the switch to a 7-day default isn't overridden by a range saved before it.
+const RANGE_STORAGE_KEY = 'sba-range-v2'
 const TYPICAL_SUPPORTED_RANGES = new Set(['6h', 'today', '7d'])
 const TYPICAL_REFRESH_MS = 30 * 60_000 // baselines drift slowly; no need for the 60s cadence
 // Flight markers are one vertical line per scheduled flight. Even a single day is ~20 flights,
@@ -106,6 +108,9 @@ const FLIGHTS_SUPPORTED_RANGES = new Set(['6h', 'today'])
 // Turned off for now: even scoped to short ranges, the vertical lines read as cluttered.
 // Flip this back on to re-enable the toggle and overlay — the rest of the code is untouched.
 const FLIGHTS_CHART_MARKERS_ENABLED = false
+// "Typical day" / "Same weekday" chart overlays, hidden while their design gets rethought. Flip
+// back on to show the toggles again; the overlay code is untouched.
+const TYPICAL_TOGGLES_ENABLED = false
 
 const $ = (id) => document.getElementById(id)
 const els = {
@@ -503,7 +508,7 @@ function hideBarTooltip() {
 const WHEN_DAYS = 7
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const whenDayFmt = new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone, weekday: 'short', month: 'short', day: 'numeric' })
-const whenEls = { wrap: $('when'), day: $('when-day'), hourLabel: $('when-hour-label'), hour: $('when-hour'), note: $('when-note'), bestBet: $('best-bet') }
+const whenEls = { wrap: $('when'), day: $('when-day'), hourLabel: $('when-hour-label'), hour: $('when-hour'), note: $('when-note'), verdict: $('verdict') }
 
 function hourLabel(hour) {
   return `${hour % 12 || 12} ${hour < 12 ? 'am' : 'pm'}`
@@ -569,7 +574,7 @@ function rerenderTiles() {
   const when = currentWhen()
   whenEls.hourLabel.hidden = !when
   renderTiles(state.latest, state.mini, when)
-  renderBestBet(state.latest, when)
+  renderVerdict(state.latest, when)
   renderWhenNote(when)
 }
 
@@ -585,32 +590,79 @@ function renderWhenNote(when) {
   whenEls.note.textContent = `${basis} Holidays and big events can run well above usual; pick Now for live counts.`
 }
 
-// One plain sentence answering "where should I park?": the lot with the most open spots, and
-// any lot that's nearly full. Counts only; it doesn't weigh price or the shuttle ride.
-function renderBestBet(latest, when) {
-  const rows = latest.lots
-    .map((lot) => {
-      if (!when) return lot.stale ? null : { name: shortName(lot.lotName), open: lot.free, percent: lot.percent }
-      const t = typicalLotFor(lot.lotId)
-      const p = t ? usualCurve(t, when.weekday).hours[when.hour] : null
-      return p === null || p === undefined ? null : { name: shortName(lot.lotName), open: Math.max(0, Math.round(lot.total * (1 - p / 100))), percent: p }
-    })
-    .filter(Boolean)
-  if (!rows.length) {
-    whenEls.bestBet.textContent = when ? `No history for ${when.label.toLowerCase()} yet.` : 'No fresh counts from the airport right now. The tiles show its last numbers.'
+// "Can I park in Short-term?" is the question behind most visits, so the line above the tiles
+// answers that first, and names a fallback lot when the answer is no. Judged on open spots, not
+// percent full: 15 open is a real chance, 3 open usually means circling. The cutoffs are a
+// judgment call, not measured against anyone actually finding a spot.
+const SHORT_TERM_LOT_ID = '3'
+const FALLBACK_ORDER = ['4', '2'] // Long-term shares Short-term's entrance; Economy is a shuttle ride
+const VERDICTS = [
+  { key: 'yes', min: 20, word: 'Yes', usual: 'Usually yes' },
+  { key: 'likely', min: 8, word: 'Probably', usual: 'Usually tight' },
+  { key: 'unlikely', min: 1, word: 'Unlikely', usual: 'Usually unlikely' },
+  { key: 'no', min: 0, word: 'No, it’s full', usual: 'Usually full' },
+]
+const VERDICT_TOKEN = { yes: '--status-good', likely: '--status-warning', unlikely: '--status-serious', no: '--status-critical' }
+function verdictFor(open) {
+  return VERDICTS.find((v) => open >= v.min)
+}
+function openAt(lot, when) {
+  if (!when) return lot.stale ? null : lot.free
+  const t = typicalLotFor(lot.lotId)
+  const p = t ? usualCurve(t, when.weekday).hours[when.hour] : null
+  return p === null || p === undefined ? null : Math.max(0, Math.round(lot.total * (1 - p / 100)))
+}
+
+function renderVerdict(latest, when) {
+  const el = whenEls.verdict
+  const short = latest.lots.find((l) => l.lotId === SHORT_TERM_LOT_ID)
+  if (!short) {
+    el.replaceChildren()
     return
   }
-  const usually = when ? 'usually ' : ''
-  const best = rows.reduce((a, b) => (b.open > a.open ? b : a))
-  const prefix = when ? `${when.label}: ` : ''
-  let text = `${prefix}${best.name} ${usually}has the most room, ${when ? '~' : ''}${best.open.toLocaleString()} open${when ? '' : ' right now'}.`
-  const tight = rows.filter((r) => r !== best && r.percent >= 90)
-  if (tight.length) {
-    const names = tight.map((r) => r.name).join(' and ')
-    const verb = tight.length > 1 ? 'are' : 'is'
-    text += ` ${names} ${verb} ${usually}${tight.every((r) => r.percent >= 100) ? 'full' : 'nearly full'}.`
+  const question = document.createElement('span')
+  question.className = 'verdict-q'
+  question.textContent = when ? `Short-term, ${when.label.replace(/^Today/, 'today').replace(/^Tomorrow/, 'tomorrow')}?` : 'Can I park in Short-term?'
+  const answer = document.createElement('span')
+  answer.className = 'verdict-a'
+
+  const open = openAt(short, when)
+  if (open === null) {
+    el.style.setProperty('--verdict-color', 'var(--muted)')
+    answer.textContent = when
+      ? 'No history for that hour yet.'
+      : `No fresh count since ${fmt.time.format(new Date(short.sourceUpdatedAt))}; the last one was ${short.free} open.`
+    el.replaceChildren(question, answer)
+    return
   }
-  whenEls.bestBet.textContent = text
+  const v = verdictFor(open)
+  el.style.setProperty('--verdict-color', `var(${VERDICT_TOKEN[v.key]})`)
+  const strong = document.createElement('strong')
+  strong.textContent = when ? v.usual : v.word
+  const parts = []
+  if (v.key !== 'no') parts.push(`${when ? '~' : ''}${open.toLocaleString()} open${when ? '' : ' right now'}`)
+  if (!when && v.key === 'likely') {
+    const hist = state.mini?.lots.find((l) => l.lotId === SHORT_TERM_LOT_ID)
+    const t = hist ? trendFor(short.percent, hist.points, TREND_WINDOW_MS, Date.parse(short.sourceUpdatedAt)) : null
+    if (t?.key === 'tightening') parts.push('and filling')
+  }
+  let text = parts.length ? `, ${parts.join(' ')}.` : '.'
+  // Later today, say so when today is already running fuller than usual: the usual number is
+  // then likely optimistic.
+  if (when?.dayIndex === 0) {
+    const vs = vsUsualText(short)
+    if (vs && /fuller/.test(vs)) text += ' Today is running fuller than usual.'
+  }
+  if (v.key === 'unlikely' || v.key === 'no') {
+    const others = FALLBACK_ORDER.map((id) => latest.lots.find((l) => l.lotId === id))
+      .filter(Boolean)
+      .map((lot) => ({ lot, open: openAt(lot, when) }))
+      .filter((o) => o.open !== null)
+    const pick = others.find((o) => o.open >= VERDICTS[0].min) ?? others.sort((a, b) => b.open - a.open)[0]
+    if (pick) text += ` Try ${shortName(pick.lot.lotName)}: ${when ? 'usually ~' : ''}${pick.open.toLocaleString()} open.`
+  }
+  answer.append(strong, document.createTextNode(text))
+  el.replaceChildren(question, answer)
 }
 
 // The tile's 24-hour strip, midnight to midnight. Live mode: earlier hours are what actually
@@ -990,7 +1042,7 @@ function renderChart(history) {
   }
 
   // Series (path breaks use gapMs, defined with the outage bands above).
-  const typicalOn = (state.showTypicalDay || state.showTypicalDow) && TYPICAL_SUPPORTED_RANGES.has(state.range)
+  const typicalOn = TYPICAL_TOGGLES_ENABLED && (state.showTypicalDay || state.showTypicalDow) && TYPICAL_SUPPORTED_RANGES.has(state.range)
   const minDowDays = state.typical?.minDaysForDayOfWeek ?? 3
   const series = lots.map((lot, i) => {
     const color = lotColorVar(lot.lotId, i)
@@ -1323,10 +1375,12 @@ async function loadHistory() {
     const history = await getJson(`api/history?range=${encodeURIComponent(state.range)}`)
     if (seq !== historyRequestSeq) return // a newer request has since started; drop this one
     state.history = history
-    // The flight board (and, if re-enabled, the chart's flight-line overlay) both track
-    // whatever window the range selector just resolved, so one fetch feeds both.
-    const sinceTs = Math.floor(Date.parse(state.history.sinceAt) / 1000)
-    const untilTs = Math.floor(Date.parse(state.history.untilAt) / 1000)
+    // The flight board always shows today, whatever the chart's range: a 7-day board would be
+    // hundreds of rows. The chart's flight-line overlay (if re-enabled) only runs on 6h and
+    // Today, which this window covers.
+    const nowMs = Date.now()
+    const sinceTs = Math.floor(nextLocalMidnight(nowMs - 86400_000 + 1) / 1000)
+    const untilTs = Math.floor(nextLocalMidnight(nowMs + 1) / 1000)
     try {
       const flights = await getJson(`api/flights?since=${sinceTs}&until=${untilTs}`)
       if (seq !== historyRequestSeq) return
@@ -1364,7 +1418,7 @@ async function loadTypical() {
 // "Same weekday" until at least one weekday has enough distinct historical days to average.
 // "Typical day" only needs *some* data, so it's enabled as soon as the fetch succeeds.
 function updateTypicalAvailability() {
-  const supported = TYPICAL_SUPPORTED_RANGES.has(state.range)
+  const supported = TYPICAL_TOGGLES_ENABLED && TYPICAL_SUPPORTED_RANGES.has(state.range)
   els.typicalGroup.hidden = !supported
   if (!supported) return
 
@@ -1429,7 +1483,7 @@ $('range-group').addEventListener('click', (ev) => {
   if (!btn || btn.dataset.range === state.range) return
   state.range = btn.dataset.range
   setPressed($('range-group'), 'range', state.range)
-  try { localStorage.setItem('sba-range', state.range) } catch {}
+  try { localStorage.setItem(RANGE_STORAGE_KEY, state.range) } catch {}
   updateTypicalAvailability()
   updateFlightsAvailability()
   loadHistory()
@@ -1455,7 +1509,7 @@ new ResizeObserver(() => {
 }).observe(els.chartWrap)
 
 try {
-  const saved = localStorage.getItem('sba-range')
+  const saved = localStorage.getItem(RANGE_STORAGE_KEY)
   if (saved && $('range-group').querySelector(`[data-range="${saved}"]`)) {
     state.range = saved
     setPressed($('range-group'), 'range', saved)

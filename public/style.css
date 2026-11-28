@@ -157,8 +157,15 @@ a { color: inherit; text-decoration-color: var(--muted); }
 
 /* Where to park: the one-line answer and the When picker above the tiles */
 .plan-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 12px; }
-.best-bet { margin: 0; font-size: 16px; font-weight: 550; color: var(--ink); flex: 1 1 320px; }
-.best-bet:empty { display: none; }
+.verdict { margin: 0; flex: 1 1 320px; display: flex; flex-direction: column; gap: 2px; }
+.verdict:empty { display: none; }
+.verdict-q { font-size: 13px; color: var(--ink-2); }
+.verdict-a { font-size: 18px; color: var(--ink); line-height: 1.35; }
+.verdict-a strong { font-weight: 700; }
+.verdict-a strong::before {
+  content: ''; display: inline-block; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--verdict-color, var(--muted)); margin-right: 7px; vertical-align: 1px;
+}
 .when { display: flex; gap: 8px; flex-wrap: wrap; }
 .when label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
 .when label[hidden] { display: none; }

@@ -35,7 +35,7 @@
 
   <main>
     <section class="plan-bar" aria-label="Where to park">
-      <p class="best-bet" id="best-bet" aria-live="polite"></p>
+      <p class="verdict" id="verdict" aria-live="polite"></p>
       <div class="when" id="when" hidden>
         <label>When <select id="when-day"></select></label>
         <label id="when-hour-label" hidden>at <select id="when-hour"></select></label>
@@ -51,8 +51,8 @@
         <div class="viz-controls">
           <div class="seg" role="group" aria-label="Time range" id="range-group">
             <button type="button" data-range="6h" title="Show the last 6 hours.">6h</button>
-            <button type="button" data-range="today" aria-pressed="true" title="Show today, midnight to midnight.">Today</button>
-            <button type="button" data-range="7d" title="Show the last 7 days.">7d</button>
+            <button type="button" data-range="today" title="Show today, midnight to midnight.">Today</button>
+            <button type="button" data-range="7d" aria-pressed="true" title="Show the last 7 days.">7d</button>
             <button type="button" data-range="30d" title="Show the last 30 days.">30d</button>
             <button type="button" data-range="all" title="Show all recorded history.">All</button>
           </div>
